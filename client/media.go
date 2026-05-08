@@ -2,8 +2,6 @@ package client
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -164,50 +162,11 @@ func (w *WhatsAppClient) patchMediaPath(chatJID, msgID, path string) {
 	})
 }
 
-// patchRecord finds the message record matching msgID in the chat's JSONL,
-// applies mutate, and rewrites the file atomically (temp + rename) only if
-// mutate returned true. Used for media-path fills, reaction updates, and
-// future edit/delete features.
+// patchRecord delegates to MessageStore.Patch. The wrapper is kept so the
+// existing call sites stay short. Errors are logged but not surfaced —
+// matches the previous best-effort behavior of the JSONL implementation.
 func (w *WhatsAppClient) patchRecord(chatJID, msgID string, mutate func(*SavedMessage) bool) {
-	w.muStoreFile.Lock()
-	defer w.muStoreFile.Unlock()
-
-	src := filepath.Join(".", "store", fmt.Sprintf("msg_%s.json", chatJID))
-	in, err := os.Open(src)
-	if err != nil {
-		return
-	}
-	defer in.Close()
-
-	tmp, err := os.CreateTemp(filepath.Dir(src), "msg_*.tmp")
-	if err != nil {
-		return
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-
-	dec := json.NewDecoder(in)
-	enc := json.NewEncoder(tmp)
-	patched := false
-	for dec.More() {
-		var rec SavedMessage
-		if err := dec.Decode(&rec); err != nil {
-			continue
-		}
-		if rec.ID == msgID {
-			if mutate(&rec) {
-				patched = true
-			}
-		}
-		if err := enc.Encode(&rec); err != nil {
-			tmp.Close()
-			return
-		}
-	}
-	if err := tmp.Close(); err != nil {
-		return
-	}
-	if patched {
-		_ = os.Rename(tmpName, src)
+	if err := w.msgStore.Patch(chatJID, msgID, mutate); err != nil {
+		log.Printf("patchRecord %s/%s: %v", chatJID, msgID, err)
 	}
 }

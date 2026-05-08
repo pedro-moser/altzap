@@ -42,10 +42,22 @@ func main() {
 		log.Printf("Warning: could not get device: %v", err)
 	}
 
+	msgStore, err := client.OpenMessageStore("store/messages.db")
+	if err != nil {
+		log.Fatalf("Failed to open message store: %v", err)
+	}
+	defer msgStore.Close()
+
+	if migrated, err := client.MigrateLegacyJSONLs(msgStore, "store"); err != nil {
+		log.Printf("warning: legacy JSONL migration failed: %v", err)
+	} else if migrated > 0 {
+		log.Printf("migrated %d legacy messages from JSONL to SQLite", migrated)
+	}
+
 	// Migrate any pre-circular avatar JPGs to circular PNGs (idempotent).
 	client.MigrateLegacyAvatars()
 
-	waClient := client.NewWhatsAppClient(storeContainer)
+	waClient := client.NewWhatsAppClient(storeContainer, msgStore)
 	loginUI := ui.NewLoginUI(fApp, waClient, window)
 	var chatView *ui.ChatView
 

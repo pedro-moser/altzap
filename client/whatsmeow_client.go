@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -157,6 +156,7 @@ type Chat struct {
 type WhatsAppClient struct {
 	client            *whatsmeow.Client
 	store             *sqlstore.Container
+	msgStore          *MessageStore
 	OnMessage         func(MessageEvent)
 	OnLogin           LoginCallback
 	OnHistoryUpdate   func()
@@ -174,12 +174,13 @@ type WhatsAppClient struct {
 	muChats           sync.RWMutex
 	groupCache        map[string]string // jid -> group name
 	muGroups          sync.RWMutex
-	muStoreFile       sync.Mutex // serialize writes to store/*.json
 }
 
-// NewWhatsAppClient creates a new WhatsApp client instance
-func NewWhatsAppClient(clientStore *sqlstore.Container) *WhatsAppClient {
+// NewWhatsAppClient creates a new WhatsApp client instance.
+// msgStore is required — chat history persistence goes through it.
+func NewWhatsAppClient(clientStore *sqlstore.Container, msgStore *MessageStore) *WhatsAppClient {
 	wa := &WhatsAppClient{
+		msgStore:     msgStore,
 		ContactCache: make(map[string]Contact),
 		messages:     make(map[string][]MessageEvent),
 		chatRegistry: make(map[string]string),
@@ -717,60 +718,12 @@ func extractText(m *waE2E.Message) string {
 	return ""
 }
 
-// loadMessageIDs returns the set of message IDs already stored for a chat,
-// for dedup when HistorySync redelivers messages we've already saved.
-func (w *WhatsAppClient) loadMessageIDs(jidStr string) map[string]bool {
-	out := make(map[string]bool)
-	path := filepath.Join(".", "store", fmt.Sprintf("msg_%s.json", jidStr))
-	f, err := os.Open(path)
-	if err != nil {
-		return out
-	}
-	defer f.Close()
-	dec := json.NewDecoder(f)
-	for dec.More() {
-		var m struct {
-			ID string `json:"id"`
-		}
-		if err := dec.Decode(&m); err != nil {
-			continue
-		}
-		if m.ID != "" {
-			out[m.ID] = true
-		}
-	}
-	return out
-}
-
-// appendMessages writes records to store/msg_<jid>.json, one JSON object per line.
+// appendMessages persists records to the SQLite store. Kept as a thin
+// wrapper for callers; jidStr is redundant (each rec carries ChatJID)
+// but the parameter signature is preserved to keep the call sites short.
 func (w *WhatsAppClient) appendMessages(jidStr string, msgs []SavedMessage) error {
-	if len(msgs) == 0 {
-		return nil
-	}
-	
-	w.muStoreFile.Lock()
-	defer w.muStoreFile.Unlock()
-
-	storeDir := filepath.Join(".", "store")
-	if err := os.MkdirAll(storeDir, 0755); err != nil {
-		return fmt.Errorf("failed to create store directory: %w", err)
-	}
-	
-	path := filepath.Join(storeDir, fmt.Sprintf("msg_%s.json", jidStr))
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open message file: %w", err)
-	}
-	defer f.Close()
-
-	enc := json.NewEncoder(f)
-	for _, m := range msgs {
-		if err := enc.Encode(m); err != nil {
-			return fmt.Errorf("failed to encode message: %w", err)
-		}
-	}
-	
-	return nil
+	_ = jidStr // each record's ChatJID is the source of truth
+	return w.msgStore.InsertBatch(msgs)
 }
 
 // handleHistorySync processes a batch of historical messages from the phone,
@@ -813,7 +766,6 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 			continue
 		}
 
-		seen := w.loadMessageIDs(jidStr)
 		var batch []SavedMessage
 
 		for _, hm := range hmsgs {
@@ -838,10 +790,6 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 			}
 			key := wmsg.GetKey()
 			id := key.GetID()
-			if id != "" && seen[id] {
-				continue
-			}
-
 			sender := key.GetParticipant()
 			if sender == "" {
 				if key.GetFromMe() && w.client != nil && w.client.Store.ID != nil {
@@ -885,9 +833,6 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 				rec.ThumbB64 = base64.StdEncoding.EncodeToString(thumb)
 			}
 			batch = append(batch, rec)
-			if id != "" {
-				seen[id] = true
-			}
 		}
 
 		if len(batch) == 0 {
@@ -1303,6 +1248,19 @@ func (w *WhatsAppClient) FetchContacts() {
 		}
 		w.muContacts.Unlock()
 	}()
+}
+
+// LoadMessages returns persisted messages for a chat in chronological order.
+// Direct passthrough to MessageStore.LoadChat — kept on the client surface
+// so the UI doesn't need to import the store type directly.
+func (w *WhatsAppClient) LoadMessages(chatJID string) ([]SavedMessage, error) {
+	return w.msgStore.LoadChat(chatJID)
+}
+
+// ChatSummaries returns one ChatSummary per known chat, ordered by recency.
+// Replaces the UI's previous loop of os.ReadDir + os.Stat + tail-parse-JSONL.
+func (w *WhatsAppClient) ChatSummaries() ([]ChatSummary, error) {
+	return w.msgStore.ChatSummaries()
 }
 
 // GetContacts returns the full contact list

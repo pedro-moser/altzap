@@ -2,11 +2,9 @@ package ui
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"image/color"
-	"os"
-	"path/filepath"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -802,42 +800,35 @@ func (cv *ChatView) loadChatList() {
 		chats = []client.Chat{}
 	}
 
-	// Discover any chats that exist on disk but aren't in the API result yet
-	// (typical case: groups whose history was saved but FetchGroups hasn't run).
 	known := make(map[string]bool, len(chats))
 	for _, c := range chats {
 		known[c.JID.String()] = true
 	}
 
-	storeDir := filepath.Join(".", "store")
-	if entries, err := os.ReadDir(storeDir); err == nil {
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name := e.Name()
-			if !strings.HasPrefix(name, "msg_") || !strings.HasSuffix(name, ".json") {
-				continue
-			}
-			jidStr := strings.TrimSuffix(strings.TrimPrefix(name, "msg_"), ".json")
-			if known[jidStr] {
-				continue
-			}
-			jid, err := types.ParseJID(jidStr)
-			if err != nil {
-				continue
-			}
-			if jid.Server == types.BroadcastServer {
-				continue
-			}
-			displayName := cv.waClient.LookupName(jid)
-			chats = append(chats, client.Chat{
-				JID:         jid,
-				DisplayName: displayName,
-				IsGroup:     jid.Server == types.GroupServer,
-			})
-			known[jidStr] = true
+	summaries, err := cv.waClient.ChatSummaries()
+	if err != nil {
+		log.Printf("ChatSummaries: %v", err)
+	}
+
+	// Discover chats present in the DB but missing from the API result
+	// (typical: groups whose history was saved but FetchGroups hasn't run).
+	for _, sum := range summaries {
+		if known[sum.ChatJID] {
+			continue
 		}
+		jid, err := types.ParseJID(sum.ChatJID)
+		if err != nil {
+			continue
+		}
+		if jid.Server == types.BroadcastServer {
+			continue
+		}
+		chats = append(chats, client.Chat{
+			JID:         jid,
+			DisplayName: cv.waClient.LookupName(jid),
+			IsGroup:     jid.Server == types.GroupServer,
+		})
+		known[sum.ChatJID] = true
 	}
 
 	// Drop any status entries that snuck in from the API result.
@@ -854,21 +845,23 @@ func (cv *ChatView) loadChatList() {
 	cv.allChats = chats
 	cv.muCachedChats.Unlock()
 
+	summaryByJID := make(map[string]client.ChatSummary, len(summaries))
+	for _, s := range summaries {
+		summaryByJID[s.ChatJID] = s
+	}
+
 	var activeChats []client.Chat
 	for _, chat := range chats {
-		jidStr := chat.JID.String()
-		filename := fmt.Sprintf("msg_%s.json", jidStr)
-		path := filepath.Join(storeDir, filename)
-
-		info, err := os.Stat(path)
-		if err == nil && info.Size() > 0 {
-			chat.LastMessageTime = info.ModTime().Unix()
-			chat.LastMessage = cv.getLastMessagePreview(path)
-			if chat.DisplayName == "" {
-				chat.DisplayName = cv.waClient.LookupName(chat.JID)
-			}
-			activeChats = append(activeChats, chat)
+		sum, ok := summaryByJID[chat.JID.String()]
+		if !ok {
+			continue
 		}
+		chat.LastMessageTime = sum.LastTimestamp
+		chat.LastMessage = formatLastMessagePreview(sum)
+		if chat.DisplayName == "" {
+			chat.DisplayName = cv.waClient.LookupName(chat.JID)
+		}
+		activeChats = append(activeChats, chat)
 	}
 
 	sort.Slice(activeChats, func(i, j int) bool {
@@ -880,65 +873,25 @@ func (cv *ChatView) loadChatList() {
 	cv.muCachedChats.Unlock()
 }
 
-func (cv *ChatView) getLastMessagePreview(path string) string {
-	// Tail-seek: read at most the last 16KB and parse the trailing JSONL line.
-	// 16KB comfortably covers records with embedded JPEG thumbnails (~5-10KB
-	// base64) without paying the I/O of a multi-MB chat history just for a
-	// sidebar preview.
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
+// formatLastMessagePreview turns a ChatSummary into the sidebar's preview
+// line. Mirrors the previous getLastMessagePreview formatting (legacy
+// "Name: " prefix stripping, "[mediatype]" fallback, "You: " / "Sender: "
+// prefix).
+func formatLastMessagePreview(s client.ChatSummary) string {
+	text := s.LastText
+	if text == "" && s.LastMediaType != "" {
+		text = "[" + s.LastMediaType + "]"
 	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil || info.Size() == 0 {
-		return ""
-	}
-
-	const window int64 = 16 * 1024
-	off := info.Size() - window
-	if off < 0 {
-		off = 0
-	}
-	buf := make([]byte, info.Size()-off)
-	if _, err := f.ReadAt(buf, off); err != nil {
-		return ""
-	}
-
-	tail := strings.TrimRight(string(buf), "\n")
-	if i := strings.LastIndex(tail, "\n"); i >= 0 {
-		tail = tail[i+1:]
-	}
-
-	var lastMsg struct {
-		Text       string `json:"text"`
-		FromMe     bool   `json:"from_me"`
-		SenderName string `json:"sender_name,omitempty"`
-		MediaType  string `json:"media_type,omitempty"`
-	}
-	if err := json.Unmarshal([]byte(tail), &lastMsg); err != nil {
-		return ""
-	}
-
-	text := lastMsg.Text
-	// Media fallback: if text/caption empty, surface the media type.
-	if text == "" && lastMsg.MediaType != "" {
-		text = "[" + lastMsg.MediaType + "]"
-	}
-
-	// Strip legacy "Name: text" prefix on old records (no sender_name).
-	if lastMsg.SenderName == "" {
+	if s.LastSenderName == "" {
 		if idx := strings.Index(text, ": "); idx >= 0 && idx < 40 {
 			text = text[idx+2:]
 		}
 	}
-
 	switch {
-	case lastMsg.FromMe:
+	case s.LastFromMe:
 		text = "You: " + text
-	case lastMsg.SenderName != "":
-		text = lastMsg.SenderName + ": " + text
+	case s.LastSenderName != "":
+		text = s.LastSenderName + ": " + text
 	}
 	return text
 }
@@ -1149,63 +1102,12 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 }
 
 func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
-	var msgs []*Message
-	filename := fmt.Sprintf("msg_%s.json", jid)
-	path := filepath.Join(".", "store", filename)
-
-	file, err := os.Open(path)
+	recs, err := cv.waClient.LoadMessages(jid)
 	if err != nil {
 		return []*Message{}
 	}
-	defer file.Close()
-
-	seenID := make(map[string]bool)
-	decoder := json.NewDecoder(file)
-	for decoder.More() {
-		var sm struct {
-			ID         string `json:"id,omitempty"`
-			ChatJID    string `json:"chat_jid"`
-			SenderJID  string `json:"sender_jid"`
-			SenderName string `json:"sender_name,omitempty"`
-			Text       string `json:"text"`
-			Timestamp  int64  `json:"timestamp"`
-			FromMe     bool   `json:"from_me"`
-
-			MediaType string `json:"media_type,omitempty"`
-			MediaPath string `json:"media_path,omitempty"`
-			Mimetype  string `json:"mimetype,omitempty"`
-			FileName  string `json:"filename,omitempty"`
-			FileSize  uint64 `json:"file_size,omitempty"`
-			Width     uint32 `json:"width,omitempty"`
-			Height    uint32 `json:"height,omitempty"`
-			Duration  uint32 `json:"duration,omitempty"`
-			ThumbB64  string `json:"thumb_b64,omitempty"`
-
-			ReplyToID         string `json:"reply_to_id,omitempty"`
-			ReplyToSenderName string `json:"reply_to_sender_name,omitempty"`
-			ReplyToText       string `json:"reply_to_text,omitempty"`
-			ReplyToMediaType  string `json:"reply_to_media_type,omitempty"`
-
-			Reactions []client.SavedReaction `json:"reactions,omitempty"`
-
-			Edited  bool   `json:"edited,omitempty"`
-			Deleted bool   `json:"deleted,omitempty"`
-			Status  string `json:"status,omitempty"`
-		}
-		if err := decoder.Decode(&sm); err != nil {
-			continue
-		}
-
-		// Dedup by ID: outgoing messages may appear twice in the JSONL when
-		// the server echoes back (we persist locally on send + persistIncoming
-		// runs on the echo). Keep the first record we see.
-		if sm.ID != "" {
-			if seenID[sm.ID] {
-				continue
-			}
-			seenID[sm.ID] = true
-		}
-
+	msgs := make([]*Message, 0, len(recs))
+	for _, sm := range recs {
 		// Resolve sender display name. Prefer the explicit sender_name (new
 		// schema). Fallback for legacy records: parse "Name: text" prefix.
 		sender := ""
