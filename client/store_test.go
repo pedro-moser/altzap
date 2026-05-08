@@ -233,3 +233,50 @@ func TestPatch_MutateReturnsTrueWritesUpdate(t *testing.T) {
 		t.Errorf("Reactions not persisted: %+v", got[0].Reactions)
 	}
 }
+
+func TestChatSummaries_OrdersByLastTimestampAndReturnsLastMessage(t *testing.T) {
+	s := openTestStore(t)
+	// Chat A: 2 messages, last at ts=200
+	_ = s.Insert(SavedMessage{ChatJID: "a@x", ID: "A1", Text: "first", Timestamp: 100})
+	_ = s.Insert(SavedMessage{ChatJID: "a@x", ID: "A2", Text: "latest A", Timestamp: 200, FromMe: true, SenderName: "Me"})
+	// Chat B: 1 message at ts=300 (most recent across all)
+	_ = s.Insert(SavedMessage{ChatJID: "b@x", ID: "B1", Text: "latest B", Timestamp: 300, SenderName: "Bob", MediaType: ""})
+	// Chat C: 1 message at ts=50 (oldest)
+	_ = s.Insert(SavedMessage{ChatJID: "c@x", ID: "C1", Text: "", Timestamp: 50, SenderName: "Carol", MediaType: "image"})
+
+	sums, err := s.ChatSummaries()
+	if err != nil {
+		t.Fatalf("ChatSummaries: %v", err)
+	}
+	if len(sums) != 3 {
+		t.Fatalf("expected 3 summaries, got %d", len(sums))
+	}
+	// Order: B (300), A (200), C (50)
+	wantOrder := []string{"b@x", "a@x", "c@x"}
+	for i, jid := range wantOrder {
+		if sums[i].ChatJID != jid {
+			t.Errorf("position %d: want %s, got %s", i, jid, sums[i].ChatJID)
+		}
+	}
+	// Payload checks
+	if sums[0].LastText != "latest B" || sums[0].LastSenderName != "Bob" {
+		t.Errorf("B summary mismatch: %+v", sums[0])
+	}
+	if sums[1].LastText != "latest A" || !sums[1].LastFromMe {
+		t.Errorf("A summary mismatch: %+v", sums[1])
+	}
+	if sums[2].LastMediaType != "image" {
+		t.Errorf("C summary mismatch: %+v", sums[2])
+	}
+}
+
+func TestChatSummaries_EmptyDB(t *testing.T) {
+	s := openTestStore(t)
+	sums, err := s.ChatSummaries()
+	if err != nil {
+		t.Fatalf("ChatSummaries: %v", err)
+	}
+	if len(sums) != 0 {
+		t.Errorf("expected 0 summaries, got %d", len(sums))
+	}
+}

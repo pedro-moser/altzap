@@ -246,3 +246,48 @@ func (s *MessageStore) Patch(chatJID, msgID string, fn func(*SavedMessage) bool)
 	}
 	return tx.Commit()
 }
+
+// ChatSummary is one row per chat: the chat's JID and the metadata of
+// its most recent message. Used by the sidebar to render previews
+// without needing to read every JSONL file.
+type ChatSummary struct {
+	ChatJID        string
+	LastTimestamp  int64
+	LastText       string
+	LastFromMe     bool
+	LastSenderName string
+	LastMediaType  string
+}
+
+const chatSummariesSQL = `
+SELECT chat_jid, ts, text, from_me, sender_name, media_type
+FROM (
+    SELECT chat_jid, ts, text, from_me, sender_name, media_type,
+           ROW_NUMBER() OVER (PARTITION BY chat_jid ORDER BY ts DESC) AS rn
+    FROM messages
+)
+WHERE rn = 1
+ORDER BY ts DESC
+`
+
+// ChatSummaries returns every known chat with its most recent message,
+// ordered by recency. One query replaces the previous loop of os.ReadDir
+// + os.Stat + tail-parse-JSONL per chat.
+func (s *MessageStore) ChatSummaries() ([]ChatSummary, error) {
+	rows, err := s.db.Query(chatSummariesSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ChatSummary
+	for rows.Next() {
+		var c ChatSummary
+		var fromMe int
+		if err := rows.Scan(&c.ChatJID, &c.LastTimestamp, &c.LastText, &fromMe, &c.LastSenderName, &c.LastMediaType); err != nil {
+			return nil, err
+		}
+		c.LastFromMe = fromMe != 0
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
