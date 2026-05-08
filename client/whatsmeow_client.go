@@ -693,7 +693,7 @@ func (w *WhatsAppClient) persistIncoming(msg *events.Message, mediaType, mime, f
 	if len(thumb) > 0 {
 		rec.ThumbB64 = base64.StdEncoding.EncodeToString(thumb)
 	}
-	if err := w.appendMessages(rec.ChatJID, []SavedMessage{rec}); err != nil {
+	if err := w.msgStore.InsertBatch([]SavedMessage{rec}); err != nil {
 		log.Printf("persistIncoming: %v", err)
 	}
 }
@@ -716,14 +716,6 @@ func extractText(m *waE2E.Message) string {
 		return t
 	}
 	return ""
-}
-
-// appendMessages persists records to the SQLite store. Kept as a thin
-// wrapper for callers; jidStr is redundant (each rec carries ChatJID)
-// but the parameter signature is preserved to keep the call sites short.
-func (w *WhatsAppClient) appendMessages(jidStr string, msgs []SavedMessage) error {
-	_ = jidStr // each record's ChatJID is the source of truth
-	return w.msgStore.InsertBatch(msgs)
 }
 
 // handleHistorySync processes a batch of historical messages from the phone,
@@ -843,7 +835,7 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 		sort.Slice(batch, func(i, j int) bool {
 			return batch[i].Timestamp < batch[j].Timestamp
 		})
-		w.appendMessages(jidStr, batch)
+		w.msgStore.InsertBatch(batch)
 		totalNew += len(batch)
 	}
 
@@ -893,7 +885,7 @@ func (w *WhatsAppClient) persistOwn(rec SavedMessage) {
 	if rec.Timestamp == 0 {
 		rec.Timestamp = time.Now().Unix()
 	}
-	if err := w.appendMessages(rec.ChatJID, []SavedMessage{rec}); err != nil {
+	if err := w.msgStore.InsertBatch([]SavedMessage{rec}); err != nil {
 		log.Printf("persistOwn: %v", err)
 	}
 }
