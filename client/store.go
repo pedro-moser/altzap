@@ -2,6 +2,7 @@ package client
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -69,4 +70,107 @@ func OpenMessageStore(path string) (*MessageStore, error) {
 
 func (s *MessageStore) Close() error {
 	return s.db.Close()
+}
+
+const insertSQL = `INSERT OR IGNORE INTO messages (
+    chat_jid, id, sender_jid, sender_name, text, ts, from_me,
+    media_type, media_path, mimetype, filename, file_size, width, height, duration, thumb_b64,
+    reply_to_id, reply_to_sender_jid, reply_to_sender_name, reply_to_text, reply_to_media_type,
+    reactions_json, edited, edited_at, deleted, deleted_at, status
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+const selectChatSQL = `SELECT chat_jid, id, sender_jid, sender_name, text, ts, from_me,
+    media_type, media_path, mimetype, filename, file_size, width, height, duration, thumb_b64,
+    reply_to_id, reply_to_sender_jid, reply_to_sender_name, reply_to_text, reply_to_media_type,
+    reactions_json, edited, edited_at, deleted, deleted_at, status
+    FROM messages WHERE chat_jid = ? ORDER BY ts ASC`
+
+// execer is implemented by both *sql.DB and *sql.Tx — lets us share the
+// row-binding code between Insert and the in-transaction batch path.
+type execer interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// reactionsJSON marshals reactions, normalizing nil/empty to "[]" so the
+// column always holds valid JSON.
+func reactionsJSON(rs []SavedReaction) (string, error) {
+	if len(rs) == 0 {
+		return "[]", nil
+	}
+	b, err := json.Marshal(rs)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func insertOne(e execer, r SavedMessage) error {
+	rj, err := reactionsJSON(r.Reactions)
+	if err != nil {
+		return fmt.Errorf("marshal reactions: %w", err)
+	}
+	_, err = e.Exec(insertSQL,
+		r.ChatJID, r.ID, r.SenderJID, r.SenderName, r.Text, r.Timestamp, boolToInt(r.FromMe),
+		r.MediaType, r.MediaPath, r.Mimetype, r.FileName, r.FileSize, r.Width, r.Height, r.Duration, r.ThumbB64,
+		r.ReplyToID, r.ReplyToSenderJID, r.ReplyToSenderName, r.ReplyToText, r.ReplyToMediaType,
+		rj, boolToInt(r.Edited), r.EditedAt, boolToInt(r.Deleted), r.DeletedAt, r.Status,
+	)
+	return err
+}
+
+// Insert writes a single record. Idempotent on (chat_jid, id) — a duplicate
+// PK is silently ignored, mirroring the JSONL dedup behavior of the previous
+// implementation.
+func (s *MessageStore) Insert(rec SavedMessage) error {
+	return insertOne(s.db, rec)
+}
+
+func scanMessage(scanner interface {
+	Scan(dest ...interface{}) error
+}) (SavedMessage, error) {
+	var r SavedMessage
+	var fromMe, edited, deleted int
+	var rj string
+	if err := scanner.Scan(
+		&r.ChatJID, &r.ID, &r.SenderJID, &r.SenderName, &r.Text, &r.Timestamp, &fromMe,
+		&r.MediaType, &r.MediaPath, &r.Mimetype, &r.FileName, &r.FileSize, &r.Width, &r.Height, &r.Duration, &r.ThumbB64,
+		&r.ReplyToID, &r.ReplyToSenderJID, &r.ReplyToSenderName, &r.ReplyToText, &r.ReplyToMediaType,
+		&rj, &edited, &r.EditedAt, &deleted, &r.DeletedAt, &r.Status,
+	); err != nil {
+		return SavedMessage{}, err
+	}
+	r.FromMe = fromMe != 0
+	r.Edited = edited != 0
+	r.Deleted = deleted != 0
+	if rj != "" && rj != "[]" {
+		if err := json.Unmarshal([]byte(rj), &r.Reactions); err != nil {
+			return SavedMessage{}, fmt.Errorf("unmarshal reactions for msg %s: %w", r.ID, err)
+		}
+	}
+	return r, nil
+}
+
+// LoadChat returns all persisted messages for a chat in chronological order.
+func (s *MessageStore) LoadChat(chatJID string) ([]SavedMessage, error) {
+	rows, err := s.db.Query(selectChatSQL, chatJID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SavedMessage
+	for rows.Next() {
+		r, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
