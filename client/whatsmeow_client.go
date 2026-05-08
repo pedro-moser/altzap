@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -909,29 +910,97 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 	}
 }
 
-// SendMessage sends a text message to a chat
-func (w *WhatsAppClient) SendMessage(jid types.JID, text string) error {
+// SendMessage sends a text message to a chat. On success it persists the
+// outgoing record locally so it survives a restart even if whatsmeow's
+// own-device echo never fires. Returns the message ID.
+func (w *WhatsAppClient) SendMessage(jid types.JID, text string) (string, error) {
 	if !w.IsConnected() {
-		return fmt.Errorf("not connected to WhatsApp")
+		return "", fmt.Errorf("not connected to WhatsApp")
 	}
 
-	_, err := w.client.SendMessage(context.Background(), jid, &waE2E.Message{
+	resp, err := w.client.SendMessage(context.Background(), jid, &waE2E.Message{
 		Conversation: proto.String(text),
 	})
-	return err
+	if err != nil {
+		return "", err
+	}
+
+	w.persistOwn(savedMessage{
+		ID:        resp.ID,
+		ChatJID:   jid.String(),
+		Text:      text,
+		Timestamp: resp.Timestamp.Unix(),
+		FromMe:    true,
+	})
+	return resp.ID, nil
+}
+
+// persistOwn writes a freshly-sent record to the chat's JSONL. Tolerates
+// being called for the same ID twice (loadMessagesFromDisk dedupes by ID),
+// but normal flow only invokes once per send.
+func (w *WhatsAppClient) persistOwn(rec savedMessage) {
+	if rec.ChatJID == "" {
+		return
+	}
+	if rec.Text == "" && rec.MediaType == "" {
+		return
+	}
+	if rec.Timestamp == 0 {
+		rec.Timestamp = time.Now().Unix()
+	}
+	if err := w.appendMessages(rec.ChatJID, []savedMessage{rec}); err != nil {
+		log.Printf("persistOwn: %v", err)
+	}
+}
+
+// stashOutgoingMedia copies the source file to media/<chat>/<msg>.<ext>
+// so the persisted record points at a stable location (the user's source
+// path may move/disappear). Returns the new path or "" on failure.
+func stashOutgoingMedia(srcPath, chatJID, msgID, mime string) string {
+	if srcPath == "" || msgID == "" {
+		return ""
+	}
+	ext := extForMime(mime)
+	if ext == ".bin" {
+		// Fall back to the source's actual extension when the mime is
+		// generic/octet-stream — keeps "report.pdf" naming on disk.
+		if i := strings.LastIndex(srcPath, "."); i >= 0 {
+			ext = srcPath[i:]
+		}
+	}
+	target := mediaPath(chatJID, msgID, ext)
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return ""
+	}
+	in, err := os.Open(srcPath)
+	if err != nil {
+		return ""
+	}
+	defer in.Close()
+	out, err := os.Create(target)
+	if err != nil {
+		return ""
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return ""
+	}
+	return target
 }
 
 // SendImage sends an image message with a JPEG thumbnail and correct dimensions
 // so recipients see a proper preview before downloading.
-func (w *WhatsAppClient) SendImage(jid types.JID, path string, caption string) error {
+// Persists the outgoing record locally + stashes a copy of the file under
+// media/ so the chat history survives a restart.
+func (w *WhatsAppClient) SendImage(jid types.JID, path string, caption string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read image: %w", err)
+		return "", fmt.Errorf("read image: %w", err)
 	}
 
 	resp, err := w.client.Upload(context.Background(), data, whatsmeow.MediaImage)
 	if err != nil {
-		return fmt.Errorf("upload image: %w", err)
+		return "", fmt.Errorf("upload image: %w", err)
 	}
 
 	mime := http.DetectContentType(data)
@@ -956,26 +1025,47 @@ func (w *WhatsAppClient) SendImage(jid types.JID, path string, caption string) e
 		imageMsg.JPEGThumbnail = thumb
 	}
 
-	_, err = w.client.SendMessage(context.Background(), jid, &waE2E.Message{
+	sendResp, err := w.client.SendMessage(context.Background(), jid, &waE2E.Message{
 		ImageMessage: imageMsg,
 	})
-	return err
+	if err != nil {
+		return "", err
+	}
+
+	rec := savedMessage{
+		ID:        sendResp.ID,
+		ChatJID:   jid.String(),
+		Text:      caption,
+		Timestamp: sendResp.Timestamp.Unix(),
+		FromMe:    true,
+		MediaType: "image",
+		MediaPath: stashOutgoingMedia(path, jid.String(), sendResp.ID, mime),
+		Mimetype:  mime,
+		FileSize:  uint64(len(data)),
+		Width:     uint32(width),
+		Height:    uint32(height),
+	}
+	if len(thumb) > 0 {
+		rec.ThumbB64 = base64.StdEncoding.EncodeToString(thumb)
+	}
+	w.persistOwn(rec)
+	return sendResp.ID, nil
 }
 
 // SendFile sends a file message
-func (w *WhatsAppClient) SendFile(jid types.JID, path string, filename string) error {
+func (w *WhatsAppClient) SendFile(jid types.JID, path string, filename string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
+		return "", fmt.Errorf("failed to read file: %w", err)
 	}
 
 	mime := http.DetectContentType(data)
 	resp, err := w.client.Upload(context.Background(), data, whatsmeow.MediaDocument)
 	if err != nil {
-		return fmt.Errorf("failed to upload file: %w", err)
+		return "", fmt.Errorf("failed to upload file: %w", err)
 	}
 
-	_, err = w.client.SendMessage(context.Background(), jid, &waE2E.Message{
+	sendResp, err := w.client.SendMessage(context.Background(), jid, &waE2E.Message{
 		DocumentMessage: &waE2E.DocumentMessage{
 			URL:           &resp.URL,
 			DirectPath:    &resp.DirectPath,
@@ -987,22 +1077,38 @@ func (w *WhatsAppClient) SendFile(jid types.JID, path string, filename string) e
 			FileName:      proto.String(filename),
 		},
 	})
-	return err
+	if err != nil {
+		return "", err
+	}
+
+	w.persistOwn(savedMessage{
+		ID:        sendResp.ID,
+		ChatJID:   jid.String(),
+		Timestamp: sendResp.Timestamp.Unix(),
+		FromMe:    true,
+		MediaType: "document",
+		MediaPath: stashOutgoingMedia(path, jid.String(), sendResp.ID, mime),
+		Mimetype:  mime,
+		FileName:  filename,
+		FileSize:  uint64(len(data)),
+	})
+	return sendResp.ID, nil
 }
 
 // SendAudio sends an audio/voice message (OPUS format)
-func (w *WhatsAppClient) SendAudio(jid types.JID, path string) error {
+func (w *WhatsAppClient) SendAudio(jid types.JID, path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("failed to read audio file: %w", err)
+		return "", fmt.Errorf("failed to read audio file: %w", err)
 	}
 
 	resp, err := w.client.Upload(context.Background(), data, whatsmeow.MediaAudio)
 	if err != nil {
-		return fmt.Errorf("failed to upload audio: %w", err)
+		return "", fmt.Errorf("failed to upload audio: %w", err)
 	}
 
-	_, err = w.client.SendMessage(context.Background(), jid, &waE2E.Message{
+	mime := "audio/ogg; codecs=opus"
+	sendResp, err := w.client.SendMessage(context.Background(), jid, &waE2E.Message{
 		AudioMessage: &waE2E.AudioMessage{
 			URL:           &resp.URL,
 			DirectPath:    &resp.DirectPath,
@@ -1010,10 +1116,24 @@ func (w *WhatsAppClient) SendAudio(jid types.JID, path string) error {
 			FileEncSHA256: resp.FileEncSHA256,
 			FileSHA256:    resp.FileSHA256,
 			FileLength:    proto.Uint64(uint64(len(data))),
-			Mimetype:      proto.String("audio/ogg; codecs=opus"),
+			Mimetype:      proto.String(mime),
 		},
 	})
-	return err
+	if err != nil {
+		return "", err
+	}
+
+	w.persistOwn(savedMessage{
+		ID:        sendResp.ID,
+		ChatJID:   jid.String(),
+		Timestamp: sendResp.Timestamp.Unix(),
+		FromMe:    true,
+		MediaType: "audio",
+		MediaPath: stashOutgoingMedia(path, jid.String(), sendResp.ID, mime),
+		Mimetype:  mime,
+		FileSize:  uint64(len(data)),
+	})
+	return sendResp.ID, nil
 }
 
 // GetChats returns the list of active chats from memory cache

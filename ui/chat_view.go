@@ -1159,6 +1159,7 @@ func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 	}
 	defer file.Close()
 
+	seenID := make(map[string]bool)
 	decoder := json.NewDecoder(file)
 	for decoder.More() {
 		var sm struct {
@@ -1193,6 +1194,16 @@ func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 		}
 		if err := decoder.Decode(&sm); err != nil {
 			continue
+		}
+
+		// Dedup by ID: outgoing messages may appear twice in the JSONL when
+		// the server echoes back (we persist locally on send + persistIncoming
+		// runs on the echo). Keep the first record we see.
+		if sm.ID != "" {
+			if seenID[sm.ID] {
+				continue
+			}
+			seenID[sm.ID] = true
 		}
 
 		// Resolve sender display name. Prefer the explicit sender_name (new
@@ -1262,12 +1273,14 @@ func (cv *ChatView) sendMessage() {
 		return
 	}
 
-	if err := cv.waClient.SendMessage(jid, text); err != nil {
+	msgID, err := cv.waClient.SendMessage(jid, text)
+	if err != nil {
 		dialog.ShowError(err, cv.window)
 		return
 	}
 
 	newMsg := &Message{
+		ID:        msgID,
 		Sender:    "You",
 		Text:      text,
 		Timestamp: time.Now(),
@@ -1312,6 +1325,17 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	cv.muMessages.Lock()
 	if _, ok := cv.messages[jidStr]; !ok {
 		cv.messages[jidStr] = cv.loadMessagesFromDisk(jidStr)
+	}
+
+	// Dedup: skip if we already have this message ID (e.g. our own outgoing
+	// message we appended optimistically, now echoed back by whatsmeow).
+	if msg.Info.ID != "" {
+		for _, m := range cv.messages[jidStr] {
+			if m.ID == msg.Info.ID {
+				cv.muMessages.Unlock()
+				return
+			}
+		}
 	}
 
 	senderName := msg.SenderName

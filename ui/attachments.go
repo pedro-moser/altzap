@@ -174,14 +174,17 @@ func (cv *ChatView) pickAndSend(kind attachKind) {
 		}
 
 		go func() {
-			var sendErr error
+			var (
+				msgID   string
+				sendErr error
+			)
 			switch kind {
 			case attachImage:
-				sendErr = cv.waClient.SendImage(jid, path, "")
+				msgID, sendErr = cv.waClient.SendImage(jid, path, "")
 			case attachAudio:
-				sendErr = cv.waClient.SendAudio(jid, path)
+				msgID, sendErr = cv.waClient.SendAudio(jid, path)
 			case attachDocument:
-				sendErr = cv.waClient.SendFile(jid, path, filepath.Base(path))
+				msgID, sendErr = cv.waClient.SendFile(jid, path, filepath.Base(path))
 			}
 			if sendErr != nil {
 				fyne.Do(func() { dialog.ShowError(sendErr, cv.window) })
@@ -189,6 +192,7 @@ func (cv *ChatView) pickAndSend(kind attachKind) {
 			}
 			fyne.Do(func() {
 				cv.appendMessageBubble(&Message{
+					ID:        msgID,
 					Sender:    "You",
 					Text:      "[" + attachLabel(kind) + ": " + filepath.Base(path) + "]",
 					Timestamp: time.Now(),
@@ -258,14 +262,17 @@ func (cv *ChatView) onMicClicked() {
 	}
 
 	go func() {
-		if err := cv.waClient.SendAudio(jid, path); err != nil {
+		msgID, err := cv.waClient.SendAudio(jid, path)
+		if err != nil {
 			fyne.Do(func() { dialog.ShowError(err, cv.window) })
 			return
 		}
 		fyne.Do(func() {
 			cv.appendMessageBubble(&Message{
+				ID:        msgID,
 				Sender:    "You",
 				Text:      "[Voice message]",
+				MediaType: "voice",
 				Timestamp: time.Now(),
 				IsOwn:     true,
 			})
