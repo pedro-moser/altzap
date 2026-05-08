@@ -106,7 +106,16 @@ type ChatView struct {
 
 	avatarFetched map[string]bool // chat_jid -> we've kicked off a fetch
 	muAvatars     sync.Mutex
+
+	// Render-time limit for the open chat: 0 means default. Reset on chat
+	// switch; "Load older" bumps by renderChunk.
+	renderLimit int
 }
+
+const (
+	initialRenderLimit = 100
+	renderChunk        = 100
+)
 
 // bubbleAlignLayout places a single bubble child with a pre-decided width,
 // either left- or right-aligned within the row.
@@ -694,17 +703,56 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 }
 
 func (cv *ChatView) refreshMessages() {
+	cv.rebuildVisibleBubbles(true /* scrollToBottom */)
+}
+
+// rebuildVisibleBubbles materializes only the trailing window of cached
+// messages (capped by cv.renderLimit, default initialRenderLimit). When
+// there are more messages beyond the window, prepends a "Load older
+// messages" affordance so the user can pull more on demand.
+func (cv *ChatView) rebuildVisibleBubbles(scrollToBottom bool) {
 	cv.muMessages.RLock()
 	msgs := cv.messages[cv.currentChatJID]
-	items := make([]fyne.CanvasObject, len(msgs))
-	for i, m := range msgs {
-		items[i] = cv.buildMessageBubble(m)
+
+	limit := cv.renderLimit
+	if limit <= 0 {
+		limit = initialRenderLimit
+	}
+	start := 0
+	if len(msgs) > limit {
+		start = len(msgs) - limit
+	}
+
+	items := make([]fyne.CanvasObject, 0, len(msgs)-start+1)
+	if start > 0 {
+		olderBtn := widget.NewButton(
+			fmt.Sprintf("Load %d older messages", min(renderChunk, start)),
+			cv.loadOlderMessages,
+		)
+		olderBtn.Importance = widget.LowImportance
+		items = append(items, container.NewCenter(olderBtn))
+	}
+	for _, m := range msgs[start:] {
+		items = append(items, cv.buildMessageBubble(m))
 	}
 	cv.muMessages.RUnlock()
 
 	cv.messageBox.Objects = items
 	cv.messageBox.Refresh()
-	cv.messageScroll.ScrollToBottom()
+	if scrollToBottom {
+		cv.messageScroll.ScrollToBottom()
+	}
+}
+
+// loadOlderMessages expands the render window by renderChunk and rebuilds
+// without scrolling — keeps the user's current view stable while older
+// content is now revealed above.
+func (cv *ChatView) loadOlderMessages() {
+	if cv.renderLimit <= 0 {
+		cv.renderLimit = initialRenderLimit
+	}
+	cv.renderLimit += renderChunk
+	cv.rebuildVisibleBubbles(false)
 }
 
 func (cv *ChatView) appendMessageBubble(msg *Message) {
@@ -833,13 +881,34 @@ func (cv *ChatView) loadChatList() {
 }
 
 func (cv *ChatView) getLastMessagePreview(path string) string {
-	data, err := os.ReadFile(path)
+	// Tail-seek: read at most the last 16KB and parse the trailing JSONL line.
+	// 16KB comfortably covers records with embedded JPEG thumbnails (~5-10KB
+	// base64) without paying the I/O of a multi-MB chat history just for a
+	// sidebar preview.
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) == 0 {
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
 		return ""
+	}
+
+	const window int64 = 16 * 1024
+	off := info.Size() - window
+	if off < 0 {
+		off = 0
+	}
+	buf := make([]byte, info.Size()-off)
+	if _, err := f.ReadAt(buf, off); err != nil {
+		return ""
+	}
+
+	tail := strings.TrimRight(string(buf), "\n")
+	if i := strings.LastIndex(tail, "\n"); i >= 0 {
+		tail = tail[i+1:]
 	}
 
 	var lastMsg struct {
@@ -848,7 +917,7 @@ func (cv *ChatView) getLastMessagePreview(path string) string {
 		SenderName string `json:"sender_name,omitempty"`
 		MediaType  string `json:"media_type,omitempty"`
 	}
-	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &lastMsg); err != nil {
+	if err := json.Unmarshal([]byte(tail), &lastMsg); err != nil {
 		return ""
 	}
 
@@ -1032,6 +1101,7 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 	}
 
 	cv.currentChatJID = jidStr
+	cv.renderLimit = 0 // back to the default tail size for the new chat
 	cv.resetUnread(jidStr)
 
 	cv.muMessages.Lock()
