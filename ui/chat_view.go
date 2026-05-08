@@ -53,6 +53,9 @@ type Message struct {
 	// Mutations after delivery (mutable)
 	Edited  bool
 	Deleted bool
+
+	// Outgoing-message delivery status: "" | "delivered" | "read" | "played"
+	Status string
 }
 
 // Catppuccin-derived semantic colors used by the chat UI.
@@ -100,6 +103,9 @@ type ChatView struct {
 	muUnread        sync.RWMutex
 	notifyHook      func(senderName, chatName, preview string, isGroup bool) // optional, set by app
 	totalUnreadHook func(total int)                                          // optional, for tray tooltip
+
+	avatarFetched map[string]bool // chat_jid -> we've kicked off a fetch
+	muAvatars     sync.Mutex
 }
 
 // bubbleAlignLayout places a single bubble child with a pre-decided width,
@@ -162,11 +168,12 @@ func (b bubbleAlignLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 
 func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.Window) *ChatView {
 	cv := &ChatView{
-		fyneApp:  fyneApp,
-		waClient: waClient,
-		window:   window,
-		messages: make(map[string][]*Message),
-		unread:   make(map[string]int),
+		fyneApp:       fyneApp,
+		waClient:      waClient,
+		window:        window,
+		messages:      make(map[string][]*Message),
+		unread:        make(map[string]int),
+		avatarFetched: make(map[string]bool),
 	}
 
 	cv.waClient.FetchContacts()
@@ -228,6 +235,22 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		for _, m := range cv.messages[upd.ChatJID] {
 			if m.ID == upd.MessageID {
 				m.Deleted = true
+				break
+			}
+		}
+		cv.muMessages.Unlock()
+
+		if upd.ChatJID == cv.currentChatJID && cv.messageBox != nil {
+			fyne.Do(func() { cv.refreshMessages() })
+		}
+	}
+
+	// Receipts: bump status (no downgrades — handled in client).
+	cv.waClient.OnMessageStatus = func(upd client.MessageStatus) {
+		cv.muMessages.Lock()
+		for _, m := range cv.messages[upd.ChatJID] {
+			if m.ID == upd.MessageID {
+				m.Status = upd.Status
 				break
 			}
 		}
@@ -393,7 +416,13 @@ func (cv *ChatView) buildChatList() *widget.List {
 			initials.TextSize = 18
 			initials.Alignment = fyne.TextAlignCenter
 
-			avatar := container.NewStack(avatarBg, container.NewCenter(initials))
+			// Photo layer sits on top of the colored circle. Hidden until we
+			// have a downloaded avatar; UpdateItem swaps File and toggles.
+			photo := canvas.NewImageFromFile("")
+			photo.FillMode = canvas.ImageFillContain
+			photo.Hide()
+
+			avatar := container.NewStack(avatarBg, container.NewCenter(initials), photo)
 			avatarSized := container.New(layout.NewGridWrapLayout(fyne.NewSize(52, 52)), avatar)
 
 			nameLabel := widget.NewLabel("")
@@ -447,6 +476,7 @@ func (cv *ChatView) buildChatList() *widget.List {
 			avatarStack := grid.Objects[0].(*fyne.Container)
 			avatarBg := avatarStack.Objects[0].(*canvas.Circle)
 			initials := avatarStack.Objects[1].(*fyne.Container).Objects[0].(*canvas.Text)
+			photo := avatarStack.Objects[2].(*canvas.Image)
 
 			textArea := textPad.Objects[0].(*fyne.Container)
 			nameLabel := textArea.Objects[0].(*widget.Label)
@@ -475,6 +505,16 @@ func (cv *ChatView) buildChatList() *widget.List {
 			initials.Text = getInitials(displayName)
 			initials.Color = whiteColor
 			initials.Refresh()
+
+			jidStr := chat.JID.String()
+			if avatarPath := client.CachedAvatar(jidStr); avatarPath != "" {
+				photo.File = avatarPath
+				photo.Refresh()
+				photo.Show()
+			} else {
+				photo.Hide()
+				cv.maybeFetchAvatar(jidStr)
+			}
 
 			n := cv.unreadFor(chat.JID.String())
 			if n > 0 {
@@ -620,7 +660,21 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 	if msg.Edited && !msg.Deleted {
 		timeStr = "edited · " + timeStr
 	}
-	timeText := canvas.NewText(timeStr, timeColor)
+	color := timeColor
+	if msg.IsOwn && !msg.Deleted {
+		var check string
+		switch msg.Status {
+		case "delivered":
+			check = "✓✓ "
+		case "read", "played":
+			check = "✓✓ "
+			color = ctpSapphire
+		default:
+			check = "✓ "
+		}
+		timeStr = check + timeStr
+	}
+	timeText := canvas.NewText(timeStr, color)
 	timeText.TextSize = 12
 	timeText.Alignment = fyne.TextAlignTrailing
 	parts = append(parts, timeText)
@@ -1063,8 +1117,9 @@ func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 
 			Reactions []client.SavedReaction `json:"reactions,omitempty"`
 
-			Edited  bool `json:"edited,omitempty"`
-			Deleted bool `json:"deleted,omitempty"`
+			Edited  bool   `json:"edited,omitempty"`
+			Deleted bool   `json:"deleted,omitempty"`
+			Status  string `json:"status,omitempty"`
 		}
 		if err := decoder.Decode(&sm); err != nil {
 			continue
@@ -1119,6 +1174,7 @@ func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 			Reactions:         sm.Reactions,
 			Edited:            sm.Edited,
 			Deleted:           sm.Deleted,
+			Status:            sm.Status,
 		})
 	}
 	return msgs
@@ -1316,4 +1372,28 @@ func (cv *ChatView) SetNotifyHook(fn func(senderName, chatName, preview string, 
 // changes (chat received message or was opened). Used for tray tooltip.
 func (cv *ChatView) SetTotalUnreadHook(fn func(total int)) {
 	cv.totalUnreadHook = fn
+}
+
+// maybeFetchAvatar kicks off an async profile picture download for the given
+// JID, but only the first time per session. EnsureAvatar dedupes inflight
+// requests internally; this UI-side cache avoids spawning a goroutine on
+// every chat-list render.
+func (cv *ChatView) maybeFetchAvatar(jidStr string) {
+	cv.muAvatars.Lock()
+	if cv.avatarFetched[jidStr] {
+		cv.muAvatars.Unlock()
+		return
+	}
+	cv.avatarFetched[jidStr] = true
+	cv.muAvatars.Unlock()
+
+	go func() {
+		if path := cv.waClient.EnsureAvatar(jidStr); path != "" {
+			fyne.Do(func() {
+				if cv.chatList != nil {
+					cv.chatList.Refresh()
+				}
+			})
+		}
+	}()
 }

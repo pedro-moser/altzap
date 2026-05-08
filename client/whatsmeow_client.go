@@ -69,6 +69,10 @@ type savedMessage struct {
 	EditedAt  int64 `json:"edited_at,omitempty"`
 	Deleted   bool  `json:"deleted,omitempty"`
 	DeletedAt int64 `json:"deleted_at,omitempty"`
+
+	// Delivery status for outgoing messages (incoming = always "").
+	// Progresses one-way: "" -> "delivered" -> "read" (or "played" for voice).
+	Status string `json:"status,omitempty"`
 }
 
 type LoginCallback func()
@@ -123,6 +127,13 @@ type MessageDelete struct {
 	DeletedAt int64
 }
 
+// MessageStatus signals an outgoing message's progress: delivered/read/played.
+type MessageStatus struct {
+	ChatJID   string
+	MessageID string
+	Status    string // "delivered" | "read" | "played"
+}
+
 // Contact represents a contact in the user's contact list
 type Contact struct {
 	JID        types.JID
@@ -152,6 +163,7 @@ type WhatsAppClient struct {
 	OnReactionUpdate  func(ReactionUpdate)                   // fires when a reaction is added/removed
 	OnMessageEdit     func(MessageEdit)                      // fires when a message's text was edited
 	OnMessageDelete   func(MessageDelete)                    // fires on "delete for everyone"
+	OnMessageStatus   func(MessageStatus)                    // fires when delivered/read receipt arrives
 	muChannels        sync.RWMutex
 	ContactCache      map[string]Contact
 	muContacts        sync.RWMutex
@@ -200,6 +212,8 @@ func NewWhatsAppClient(clientStore *sqlstore.Container) *WhatsAppClient {
 			wa.client.Store.ID = nil
 		case *events.HistorySync:
 			wa.handleHistorySync(v)
+		case *events.Receipt:
+			wa.handleReceipt(v)
 		}
 	})
 
@@ -539,6 +553,62 @@ func (w *WhatsAppClient) handleEdit(msg *events.Message, pmsg *waE2E.ProtocolMes
 			NewText:   newText,
 			EditedAt:  ts,
 		})
+	}
+}
+
+// receiptStatus maps a whatsmeow ReceiptType to our normalized status string.
+// We only care about the cases that make a checkmark change in the UI.
+func receiptStatus(rt types.ReceiptType) string {
+	switch rt {
+	case types.ReceiptTypeDelivered:
+		return "delivered"
+	case types.ReceiptTypeRead, types.ReceiptTypeReadSelf:
+		return "read"
+	case types.ReceiptTypePlayed, types.ReceiptTypePlayedSelf:
+		return "played"
+	}
+	return ""
+}
+
+// statusRank lets patchRecord refuse to downgrade ("" < delivered < read/played).
+func statusRank(s string) int {
+	switch s {
+	case "delivered":
+		return 1
+	case "read":
+		return 2
+	case "played":
+		return 2
+	}
+	return 0
+}
+
+// handleReceipt updates Status on every message in the receipt's batch and
+// fires OnMessageStatus per message so the UI can refresh checkmarks in place.
+func (w *WhatsAppClient) handleReceipt(r *events.Receipt) {
+	status := receiptStatus(r.Type)
+	if status == "" {
+		return
+	}
+	chatJID := r.Chat.String()
+	for _, mid := range r.MessageIDs {
+		msgID := string(mid)
+		updated := false
+		w.patchRecord(chatJID, msgID, func(rec *savedMessage) bool {
+			if statusRank(status) <= statusRank(rec.Status) {
+				return false
+			}
+			rec.Status = status
+			updated = true
+			return true
+		})
+		if updated && w.OnMessageStatus != nil {
+			w.OnMessageStatus(MessageStatus{
+				ChatJID:   chatJID,
+				MessageID: msgID,
+				Status:    status,
+			})
+		}
 	}
 }
 
