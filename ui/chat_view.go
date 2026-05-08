@@ -82,6 +82,11 @@ type ChatView struct {
 	isSearching     bool
 	muCachedChats   sync.RWMutex
 	recorder        recorder
+
+	unread          map[string]int // chat_jid -> unread count (in-memory)
+	muUnread        sync.RWMutex
+	notifyHook      func(senderName, chatName, preview string, isGroup bool) // optional, set by app
+	totalUnreadHook func(total int)                                          // optional, for tray tooltip
 }
 
 // bubbleAlignLayout places a single bubble child with a pre-decided width,
@@ -148,6 +153,7 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		waClient: waClient,
 		window:   window,
 		messages: make(map[string][]*Message),
+		unread:   make(map[string]int),
 	}
 
 	cv.waClient.FetchContacts()
@@ -337,7 +343,22 @@ func (cv *ChatView) buildChatList() *widget.List {
 
 			textArea := container.NewVBox(nameLabel, subLabel)
 
-			row := container.NewBorder(nil, nil, container.NewPadded(avatarSized), nil, container.NewPadded(textArea))
+			// Unread badge: green circle with white count, hidden when zero.
+			badgeBg := canvas.NewCircle(ctpGreen)
+			badgeText := canvas.NewText("", ctpCrust)
+			badgeText.TextStyle.Bold = true
+			badgeText.TextSize = 12
+			badgeText.Alignment = fyne.TextAlignCenter
+			badgeStack := container.NewStack(badgeBg, container.NewCenter(badgeText))
+			badgeSized := container.New(layout.NewGridWrapLayout(fyne.NewSize(24, 24)), badgeStack)
+			badgeWrap := container.NewCenter(badgeSized)
+
+			row := container.NewBorder(
+				nil, nil,
+				container.NewPadded(avatarSized),
+				container.NewPadded(badgeWrap),
+				container.NewPadded(textArea),
+			)
 
 			selBg := canvas.NewRectangle(color.RGBA{R: 0, G: 0, B: 0, A: 0})
 			return container.NewStack(selBg, row)
@@ -349,15 +370,16 @@ func (cv *ChatView) buildChatList() *widget.List {
 			}
 			chat := chats[id]
 
-			// Outer is Stack(selBg, row). Row was built with
-			// NewBorder(nil, nil, leftPadded, nil, centerPadded), which yields
-			// Objects = [center, left] (top/bottom/right nil are skipped).
+			// Outer is Stack(selBg, row). Row's NewBorder(top=nil, bottom=nil,
+			// left=avatar, right=badge, center=text) yields Objects in order
+			// [center, left, right] (nil top/bottom are skipped).
 			stackC := item.(*fyne.Container)
 			selBg := stackC.Objects[0].(*canvas.Rectangle)
 			row := stackC.Objects[1].(*fyne.Container)
 
 			textPad := row.Objects[0].(*fyne.Container)
 			avatarPad := row.Objects[1].(*fyne.Container)
+			badgePad := row.Objects[2].(*fyne.Container)
 
 			grid := avatarPad.Objects[0].(*fyne.Container)
 			avatarStack := grid.Objects[0].(*fyne.Container)
@@ -367,6 +389,12 @@ func (cv *ChatView) buildChatList() *widget.List {
 			textArea := textPad.Objects[0].(*fyne.Container)
 			nameLabel := textArea.Objects[0].(*widget.Label)
 			subLabel := textArea.Objects[1].(*widget.Label)
+
+			badgeWrap := badgePad.Objects[0].(*fyne.Container)
+			badgeSized := badgeWrap.Objects[0].(*fyne.Container)
+			badgeStack := badgeSized.Objects[0].(*fyne.Container)
+			badgeBg := badgeStack.Objects[0].(*canvas.Circle)
+			badgeText := badgeStack.Objects[1].(*fyne.Container).Objects[0].(*canvas.Text)
 
 			displayName := chat.DisplayName
 			if displayName == "" {
@@ -385,6 +413,23 @@ func (cv *ChatView) buildChatList() *widget.List {
 			initials.Text = getInitials(displayName)
 			initials.Color = whiteColor
 			initials.Refresh()
+
+			n := cv.unreadFor(chat.JID.String())
+			if n > 0 {
+				badgeBg.FillColor = ctpGreen
+				if n > 99 {
+					badgeText.Text = "99+"
+				} else {
+					badgeText.Text = fmt.Sprintf("%d", n)
+				}
+				badgeBg.Show()
+				badgeText.Show()
+			} else {
+				badgeBg.FillColor = color.RGBA{A: 0}
+				badgeText.Text = ""
+			}
+			badgeBg.Refresh()
+			badgeText.Refresh()
 
 			if cv.currentChatJID == chat.JID.String() {
 				selBg.FillColor = selectionTint
@@ -841,6 +886,7 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 	}
 
 	cv.currentChatJID = jidStr
+	cv.resetUnread(jidStr)
 
 	cv.muMessages.Lock()
 	if _, ok := cv.messages[jidStr]; !ok {
@@ -1061,6 +1107,16 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	cv.messages[jidStr] = append(cv.messages[jidStr], newMsg)
 	cv.muMessages.Unlock()
 
+	// Unread + notification: only when this chat isn't on screen and the
+	// message isn't from us. Cheap heuristic — no window-focus detection.
+	if !msg.Info.IsFromMe && jidStr != cv.currentChatJID {
+		cv.incrementUnread(jidStr)
+		if cv.notifyHook != nil {
+			chatName := cv.waClient.LookupName(msg.Info.Chat)
+			cv.notifyHook(senderName, chatName, previewForMessage(newMsg), msg.Info.IsGroup)
+		}
+	}
+
 	fyne.Do(func() {
 		if jidStr == cv.currentChatJID && cv.messageBox != nil {
 			cv.appendMessageBubble(newMsg)
@@ -1071,4 +1127,80 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 		cv.loadChatList()
 		cv.refreshChats()
 	}()
+}
+
+// previewForMessage returns a short string suitable for sidebar previews and
+// notification bodies. Falls back to media-type tag when there's no text.
+func previewForMessage(m *Message) string {
+	if m.Text != "" {
+		return m.Text
+	}
+	switch m.MediaType {
+	case "image":
+		return "📷 Photo"
+	case "video":
+		return "🎬 Video"
+	case "audio":
+		return "🎵 Audio"
+	case "voice":
+		return "🎤 Voice message"
+	case "document":
+		if m.FileName != "" {
+			return "📎 " + m.FileName
+		}
+		return "📎 Document"
+	case "sticker":
+		return "🎨 Sticker"
+	}
+	return ""
+}
+
+func (cv *ChatView) incrementUnread(chatJID string) {
+	cv.muUnread.Lock()
+	cv.unread[chatJID]++
+	cv.muUnread.Unlock()
+	cv.fireTotalUnread()
+}
+
+func (cv *ChatView) resetUnread(chatJID string) {
+	cv.muUnread.Lock()
+	delete(cv.unread, chatJID)
+	cv.muUnread.Unlock()
+	cv.fireTotalUnread()
+}
+
+func (cv *ChatView) unreadFor(chatJID string) int {
+	cv.muUnread.RLock()
+	defer cv.muUnread.RUnlock()
+	return cv.unread[chatJID]
+}
+
+// TotalUnread returns the sum of unread messages across all chats — used for
+// the system tray tooltip.
+func (cv *ChatView) TotalUnread() int {
+	cv.muUnread.RLock()
+	defer cv.muUnread.RUnlock()
+	total := 0
+	for _, n := range cv.unread {
+		total += n
+	}
+	return total
+}
+
+func (cv *ChatView) fireTotalUnread() {
+	if cv.totalUnreadHook != nil {
+		cv.totalUnreadHook(cv.TotalUnread())
+	}
+}
+
+// SetNotifyHook installs a callback fired when an incoming message warrants a
+// desktop notification. Set to nil to disable.
+func (cv *ChatView) SetNotifyHook(fn func(senderName, chatName, preview string, isGroup bool)) {
+	cv.notifyHook = fn
+}
+
+// SetTotalUnreadHook installs a callback fired whenever the total unread count
+// changes (chat received message or was opened). Used for tray tooltip.
+func (cv *ChatView) SetTotalUnreadHook(fn func(total int)) {
+	cv.totalUnreadHook = fn
 }

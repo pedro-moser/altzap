@@ -79,13 +79,12 @@ type Contact struct {
 
 // Chat represents an active chat
 type Chat struct {
-	JID            types.JID
-	DisplayName    string
-	LastMessage    string
+	JID             types.JID
+	DisplayName     string
+	LastMessage     string
 	LastMessageTime int64
-	UntreadCount   int
-	IsGroup        bool
-	AvatarURL      string
+	IsGroup         bool
+	AvatarURL       string
 }
 
 // WhatsAppClient wraps the whatsmeow client with higher-level operations
