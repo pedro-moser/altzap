@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -22,28 +23,50 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// savedMessage is the on-disk JSON record for a chat message.
+// savedMessage is the on-disk JSON record for a chat message. New fields are
+// all optional so legacy records (text-only, prefixed sender) keep decoding.
 type savedMessage struct {
-	ID        string `json:"id,omitempty"`
-	ChatJID   string `json:"chat_jid"`
-	SenderJID string `json:"sender_jid"`
-	Text      string `json:"text"`
-	Timestamp int64  `json:"timestamp"`
-	FromMe    bool   `json:"from_me"`
+	ID         string `json:"id,omitempty"`
+	ChatJID    string `json:"chat_jid"`
+	SenderJID  string `json:"sender_jid"`
+	SenderName string `json:"sender_name,omitempty"` // PushName at save time, no in-text prefix
+	Text       string `json:"text"`                  // body text or caption
+	Timestamp  int64  `json:"timestamp"`
+	FromMe     bool   `json:"from_me"`
+
+	// Media (optional). When MediaType != "", treat as a media message.
+	MediaType string `json:"media_type,omitempty"` // image|video|audio|voice|document|sticker
+	MediaPath string `json:"media_path,omitempty"` // relative path; "" until downloaded
+	Mimetype  string `json:"mimetype,omitempty"`
+	FileName  string `json:"filename,omitempty"`
+	FileSize  uint64 `json:"file_size,omitempty"`
+	Width     uint32 `json:"width,omitempty"`
+	Height    uint32 `json:"height,omitempty"`
+	Duration  uint32 `json:"duration,omitempty"`  // seconds
+	ThumbB64  string `json:"thumb_b64,omitempty"` // JPEGThumbnail base64 for instant preview
 }
 
 type LoginCallback func()
 
-// MessageEvent represents an incoming message
+// MessageEvent represents an incoming message handed off to the UI layer.
 type MessageEvent struct {
-	Info        types.MessageInfo
-	Text        string
-	SenderName  string
-	SenderJid   types.JID
-	Timestamp   int64
-	IsGroup     bool
-	MediaType   string
-	MediaData   []byte
+	Info       types.MessageInfo
+	Text       string
+	SenderName string
+	SenderJid  types.JID
+	Timestamp  int64
+	IsGroup    bool
+
+	// Media (optional)
+	MediaType string
+	MediaPath string // "" until download finishes
+	Mimetype  string
+	FileName  string
+	FileSize  uint64
+	Width     uint32
+	Height    uint32
+	Duration  uint32
+	Thumb     []byte // raw JPEGThumbnail bytes
 }
 
 // Contact represents a contact in the user's contact list
@@ -72,6 +95,7 @@ type WhatsAppClient struct {
 	OnMessage       func(MessageEvent)
 	OnLogin         LoginCallback
 	OnHistoryUpdate func()
+	OnMediaReady    func(chatJID, msgID, mediaPath string) // fires when an async download finishes
 	muChannels      sync.RWMutex
 	ContactCache    map[string]Contact
 	muContacts      sync.RWMutex
@@ -185,6 +209,61 @@ func (w *WhatsAppClient) WaitUntilLoggedIn() bool {
 }
 
 
+// extractMedia inspects a whatsmeow Message proto and returns media metadata
+// suitable for persistence and UI rendering. mediaType is "" for plain text.
+func extractMedia(m *waE2E.Message) (mediaType, mime, fileName string, size uint64, w, h, dur uint32, thumb []byte, caption string) {
+	if m == nil {
+		return
+	}
+	switch {
+	case m.ImageMessage != nil:
+		im := m.ImageMessage
+		mediaType = "image"
+		mime = im.GetMimetype()
+		size = im.GetFileLength()
+		w = im.GetWidth()
+		h = im.GetHeight()
+		thumb = im.GetJPEGThumbnail()
+		caption = im.GetCaption()
+	case m.VideoMessage != nil:
+		vm := m.VideoMessage
+		mediaType = "video"
+		mime = vm.GetMimetype()
+		size = vm.GetFileLength()
+		w = vm.GetWidth()
+		h = vm.GetHeight()
+		dur = vm.GetSeconds()
+		thumb = vm.GetJPEGThumbnail()
+		caption = vm.GetCaption()
+	case m.AudioMessage != nil:
+		am := m.AudioMessage
+		if am.GetPTT() {
+			mediaType = "voice"
+		} else {
+			mediaType = "audio"
+		}
+		mime = am.GetMimetype()
+		size = am.GetFileLength()
+		dur = am.GetSeconds()
+	case m.DocumentMessage != nil:
+		dm := m.DocumentMessage
+		mediaType = "document"
+		mime = dm.GetMimetype()
+		fileName = dm.GetFileName()
+		size = dm.GetFileLength()
+		thumb = dm.GetJPEGThumbnail()
+		caption = dm.GetCaption()
+	case m.StickerMessage != nil:
+		sm := m.StickerMessage
+		mediaType = "sticker"
+		mime = sm.GetMimetype()
+		size = sm.GetFileLength()
+		w = sm.GetWidth()
+		h = sm.GetHeight()
+	}
+	return
+}
+
 func (w *WhatsAppClient) eventHandler(evt any) {
 	msg, ok := evt.(*events.Message)
 	if !ok || msg.Message == nil {
@@ -198,31 +277,28 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 	sender := msg.Info.Sender
 
 	text := extractText(msg.Message)
+	mediaType, mime, fileName, size, mw, mh, dur, thumb, caption := extractMedia(msg.Message)
 	if text == "" {
-		switch {
-		case msg.Message.ImageMessage != nil:
-			text = "[Image]"
-		case msg.Message.VideoMessage != nil:
-			text = "[Video]"
-		case msg.Message.AudioMessage != nil:
-			text = "[Audio]"
-		case msg.Message.DocumentMessage != nil:
-			text = "[Document]"
-		}
+		text = caption
 	}
 
 	messageEvent := MessageEvent{
-		Info:      msg.Info,
-		Text:      text,
-		SenderJid: sender,
-		Timestamp: ts.Unix(),
-		IsGroup:   msg.Info.IsGroup,
-		MediaType: w.guessMediaType(msg.Message),
+		Info:       msg.Info,
+		Text:       text,
+		SenderName: msg.Info.PushName,
+		SenderJid:  sender,
+		Timestamp:  ts.Unix(),
+		IsGroup:    msg.Info.IsGroup,
+		MediaType:  mediaType,
+		Mimetype:   mime,
+		FileName:   fileName,
+		FileSize:   size,
+		Width:      mw,
+		Height:     mh,
+		Duration:   dur,
+		Thumb:      thumb,
 	}
 
-	messageEvent.SenderName = msg.Info.PushName
-
-	// Handle chat registry with proper locking
 	w.muChats.Lock()
 	chatJid := msg.Info.Chat.String()
 	if _, exists := w.chatRegistry[chatJid]; !exists {
@@ -234,61 +310,55 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 	}
 	w.muChats.Unlock()
 
+	w.persistIncoming(msg, mediaType, mime, fileName, size, mw, mh, dur, thumb, text)
+
 	if w.OnMessage != nil {
 		w.OnMessage(messageEvent)
 	}
 
 	if sender.User != "" {
 		w.muContacts.Lock()
-		name := msg.Info.PushName
 		w.ContactCache[sender.String()] = Contact{
 			JID:        sender,
-			Name:       name,
+			Name:       msg.Info.PushName,
 			UpdateTime: ts.Unix(),
 		}
 		w.muContacts.Unlock()
 	}
 
-	w.saveMessage(msg)
-}
-
-func (w *WhatsAppClient) guessMediaType(msg *waE2E.Message) string {
-	switch {
-	case msg.ImageMessage != nil:
-		return "image"
-	case msg.VideoMessage != nil:
-		return "video"
-	case msg.AudioMessage != nil:
-		return "audio"
-	case msg.DocumentMessage != nil:
-		return "document"
-	case msg.StickerMessage != nil:
-		return "sticker"
-	default:
-		return "text"
+	if mediaType != "" {
+		go w.downloadAndPatch(msg)
 	}
 }
 
-func (w *WhatsAppClient) saveMessage(msg *events.Message) error {
-	text := extractText(msg.Message)
-	if text == "" {
-		return nil
+// persistIncoming writes a savedMessage record for a freshly-arrived event.
+// MediaPath stays empty until downloadAndPatch fills it asynchronously.
+func (w *WhatsAppClient) persistIncoming(msg *events.Message, mediaType, mime, fileName string, size uint64, width, height, duration uint32, thumb []byte, text string) {
+	if text == "" && mediaType == "" {
+		return
 	}
-
 	rec := savedMessage{
-		ID:        msg.Info.ID,
-		ChatJID:   msg.Info.Chat.String(),
-		SenderJID: msg.Info.Sender.String(),
-		Text:      msg.Info.PushName + ": " + text,
-		Timestamp: msg.Info.Timestamp.Unix(),
-		FromMe:    msg.Info.IsFromMe,
+		ID:         msg.Info.ID,
+		ChatJID:    msg.Info.Chat.String(),
+		SenderJID:  msg.Info.Sender.String(),
+		SenderName: msg.Info.PushName,
+		Text:       text,
+		Timestamp:  msg.Info.Timestamp.Unix(),
+		FromMe:     msg.Info.IsFromMe,
+		MediaType:  mediaType,
+		Mimetype:   mime,
+		FileName:   fileName,
+		FileSize:   size,
+		Width:      width,
+		Height:     height,
+		Duration:   duration,
 	}
-	
+	if len(thumb) > 0 {
+		rec.ThumbB64 = base64.StdEncoding.EncodeToString(thumb)
+	}
 	if err := w.appendMessages(rec.ChatJID, []savedMessage{rec}); err != nil {
-		return fmt.Errorf("failed to save message to disk: %w", err)
+		log.Printf("persistIncoming: %v", err)
 	}
-	
-	return nil
 }
 
 // isStatusJID returns true for the status@broadcast pseudo-chat that holds
@@ -415,8 +485,13 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 			if wmsg == nil {
 				continue
 			}
-			text := extractText(wmsg.GetMessage())
+			body := wmsg.GetMessage()
+			text := extractText(body)
+			mediaType, mime, fileName, size, mw, mh, dur, thumb, caption := extractMedia(body)
 			if text == "" {
+				text = caption
+			}
+			if text == "" && mediaType == "" {
 				continue
 			}
 			key := wmsg.GetKey()
@@ -434,21 +509,27 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 				}
 			}
 			pushName := wmsg.GetPushName()
-			displayText := text
-			if pushName != "" && !key.GetFromMe() {
-				displayText = pushName + ": " + text
-			} else if key.GetFromMe() {
-				displayText = "You: " + text
-			}
 
-			batch = append(batch, savedMessage{
-				ID:        id,
-				ChatJID:   jidStr,
-				SenderJID: sender,
-				Text:      displayText,
-				Timestamp: int64(wmsg.GetMessageTimestamp()),
-				FromMe:    key.GetFromMe(),
-			})
+			rec := savedMessage{
+				ID:         id,
+				ChatJID:    jidStr,
+				SenderJID:  sender,
+				SenderName: pushName,
+				Text:       text,
+				Timestamp:  int64(wmsg.GetMessageTimestamp()),
+				FromMe:     key.GetFromMe(),
+				MediaType:  mediaType,
+				Mimetype:   mime,
+				FileName:   fileName,
+				FileSize:   size,
+				Width:      mw,
+				Height:     mh,
+				Duration:   dur,
+			}
+			if len(thumb) > 0 {
+				rec.ThumbB64 = base64.StdEncoding.EncodeToString(thumb)
+			}
+			batch = append(batch, rec)
 			if id != "" {
 				seen[id] = true
 			}
