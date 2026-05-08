@@ -126,3 +126,44 @@ func TestLoadChat_OrdersByTimestampAscending(t *testing.T) {
 		}
 	}
 }
+
+func TestInsertBatch_SingleTransaction(t *testing.T) {
+	s := openTestStore(t)
+	const n = 1000
+	chat := "chat@s.whatsapp.net"
+	batch := make([]SavedMessage, n)
+	for i := 0; i < n; i++ {
+		batch[i] = SavedMessage{
+			ChatJID:   chat,
+			ID:        fmt.Sprintf("M%04d", i),
+			Text:      fmt.Sprintf("msg %d", i),
+			Timestamp: int64(i),
+		}
+	}
+	if err := s.InsertBatch(batch); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+	got, err := s.LoadChat(chat)
+	if err != nil {
+		t.Fatalf("LoadChat: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("expected %d records, got %d", n, len(got))
+	}
+	for i := 0; i < n; i++ {
+		if got[i].ID != batch[i].ID {
+			t.Errorf("position %d: want id %s, got %s", i, batch[i].ID, got[i].ID)
+			break
+		}
+	}
+}
+
+func TestInsertBatch_EmptySliceIsNoOp(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.InsertBatch(nil); err != nil {
+		t.Fatalf("InsertBatch(nil): %v", err)
+	}
+	if err := s.InsertBatch([]SavedMessage{}); err != nil {
+		t.Fatalf("InsertBatch([]): %v", err)
+	}
+}

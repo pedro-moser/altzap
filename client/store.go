@@ -157,6 +157,26 @@ func scanMessage(scanner interface {
 	return r, nil
 }
 
+// InsertBatch writes many records inside a single transaction. Same
+// idempotency as Insert — duplicates are silently dropped. Returns the
+// first error encountered; on failure the entire batch is rolled back.
+func (s *MessageStore) InsertBatch(recs []SavedMessage) error {
+	if len(recs) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // no-op after Commit
+	for _, r := range recs {
+		if err := insertOne(tx, r); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // LoadChat returns all persisted messages for a chat in chronological order.
 func (s *MessageStore) LoadChat(chatJID string) ([]SavedMessage, error) {
 	rows, err := s.db.Query(selectChatSQL, chatJID)
