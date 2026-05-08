@@ -1,0 +1,32 @@
+# Build output
+whatsappalt
+whatsappalt_*
+*.exe
+
+# Local WhatsApp session DB (whatsmeow)
+whatsapp.db
+whatsapp.db-*
+*.db-shm
+*.db-wal
+
+# Message store (user data, JSONL)
+store/
+
+# Downloaded media cache (will be added in Phase 2)
+media/
+
+# Editor / external tool configs
+.opencode/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Backups & swap
+*.backup
+*.bak
+*.swp
+*~
+
+# Go
+vendor/
