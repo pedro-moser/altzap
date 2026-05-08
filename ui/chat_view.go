@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"image/color"
@@ -23,10 +24,22 @@ import (
 )
 
 type Message struct {
+	ID        string
 	Sender    string
 	Text      string
 	Timestamp time.Time
 	IsOwn     bool
+
+	// Media (optional; MediaType == "" means plain text message)
+	MediaType string
+	MediaPath string // empty until download finishes
+	Mimetype  string
+	FileName  string
+	FileSize  uint64
+	Width     uint32
+	Height    uint32
+	Duration  uint32
+	Thumb     []byte // raw JPEGThumbnail bytes for instant preview
 }
 
 // Catppuccin-derived semantic colors used by the chat UI.
@@ -138,6 +151,24 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 	}
 
 	cv.waClient.FetchContacts()
+
+	// Update the in-memory Message and rebuild bubbles when an async media
+	// download finishes. Runs from a download goroutine, so refresh hops
+	// to the UI thread via fyne.Do.
+	cv.waClient.OnMediaReady = func(chatJID, msgID, path string) {
+		cv.muMessages.Lock()
+		for _, m := range cv.messages[chatJID] {
+			if m.ID == msgID {
+				m.MediaPath = path
+				break
+			}
+		}
+		cv.muMessages.Unlock()
+
+		if chatJID == cv.currentChatJID && cv.messageBox != nil {
+			fyne.Do(func() { cv.refreshMessages() })
+		}
+	}
 
 	go func() {
 		// Groups need an active connection. Retry with backoff until we get
@@ -391,10 +422,7 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 	}
 	bubbleBg.CornerRadius = 8
 
-	parts := make([]fyne.CanvasObject, 0, 3)
-
-	// Track the widest piece so we can size the bubble to fit naturally,
-	// up to maxBubbleWidth (then we switch on wrapping).
+	parts := make([]fyne.CanvasObject, 0, 4)
 	naturalContentWidth := float32(0)
 
 	if !msg.IsOwn && msg.Sender != "" && msg.Sender != "Unknown" && msg.Sender != "<nil>" {
@@ -407,18 +435,52 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 		}
 	}
 
-	// Probe text width without wrapping; widget.Label.MinSize reports the full
-	// unwrapped width here (because calculateMin only fills width when wrap=Off).
-	probe := widget.NewLabel(msg.Text)
-	textNatural := probe.MinSize().Width
-
-	msgLabel := widget.NewLabel(msg.Text)
-	if textNatural+bubblePadding > maxBubbleWidth {
-		msgLabel.Wrapping = fyne.TextWrapWord
-	}
-	parts = append(parts, msgLabel)
-	if textNatural > naturalContentWidth {
-		naturalContentWidth = textNatural
+	switch msg.MediaType {
+	case "image":
+		mc := buildImageBubble(msg)
+		parts = append(parts, mc)
+		if w := mc.MinSize().Width; w > naturalContentWidth {
+			naturalContentWidth = w
+		}
+	case "video":
+		mc := buildVideoBubble(msg)
+		parts = append(parts, mc)
+		if w := mc.MinSize().Width; w > naturalContentWidth {
+			naturalContentWidth = w
+		}
+	case "audio", "voice":
+		mc := buildAudioBubble(msg)
+		parts = append(parts, mc)
+		if w := mc.MinSize().Width; w > naturalContentWidth {
+			naturalContentWidth = w
+		}
+	case "document":
+		mc := buildDocBubble(msg)
+		parts = append(parts, mc)
+		if w := mc.MinSize().Width; w > naturalContentWidth {
+			naturalContentWidth = w
+		}
+	case "sticker":
+		mc := buildStickerBubble(msg)
+		parts = append(parts, mc)
+		if w := mc.MinSize().Width; w > naturalContentWidth {
+			naturalContentWidth = w
+		}
+	default:
+		// Plain text. Probe natural width without wrap so we can size the
+		// bubble to the text and only wrap when it would exceed maxBubbleWidth.
+		if msg.Text != "" {
+			probe := widget.NewLabel(msg.Text)
+			textNatural := probe.MinSize().Width
+			msgLabel := widget.NewLabel(msg.Text)
+			if textNatural+bubblePadding > maxBubbleWidth {
+				msgLabel.Wrapping = fyne.TextWrapWord
+			}
+			parts = append(parts, msgLabel)
+			if textNatural > naturalContentWidth {
+				naturalContentWidth = textNatural
+			}
+		}
 	}
 
 	timeText := canvas.NewText(msg.Timestamp.Format("15:04"), timeColor)
@@ -825,24 +887,41 @@ func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 	decoder := json.NewDecoder(file)
 	for decoder.More() {
 		var sm struct {
-			ChatJID   string `json:"chat_jid"`
-			SenderJID string `json:"sender_jid"`
-			Text      string `json:"text"`
-			Timestamp int64  `json:"timestamp"`
-			FromMe    bool   `json:"from_me"`
+			ID         string `json:"id,omitempty"`
+			ChatJID    string `json:"chat_jid"`
+			SenderJID  string `json:"sender_jid"`
+			SenderName string `json:"sender_name,omitempty"`
+			Text       string `json:"text"`
+			Timestamp  int64  `json:"timestamp"`
+			FromMe     bool   `json:"from_me"`
+
+			MediaType string `json:"media_type,omitempty"`
+			MediaPath string `json:"media_path,omitempty"`
+			Mimetype  string `json:"mimetype,omitempty"`
+			FileName  string `json:"filename,omitempty"`
+			FileSize  uint64 `json:"file_size,omitempty"`
+			Width     uint32 `json:"width,omitempty"`
+			Height    uint32 `json:"height,omitempty"`
+			Duration  uint32 `json:"duration,omitempty"`
+			ThumbB64  string `json:"thumb_b64,omitempty"`
 		}
 		if err := decoder.Decode(&sm); err != nil {
 			continue
 		}
 
+		// Resolve sender display name. Prefer the explicit sender_name (new
+		// schema). Fallback for legacy records: parse "Name: text" prefix.
 		sender := ""
 		text := sm.Text
 		if sm.FromMe {
 			sender = "You"
-			// "You" prefix is stripped from outgoing messages too — they were saved with PushName.
-			if idx := strings.Index(text, ": "); idx >= 0 && idx < 40 {
-				text = text[idx+2:]
+			if sm.SenderName == "" {
+				if idx := strings.Index(text, ": "); idx >= 0 && idx < 40 {
+					text = text[idx+2:]
+				}
 			}
+		} else if sm.SenderName != "" {
+			sender = sm.SenderName
 		} else {
 			if idx := strings.Index(text, ": "); idx >= 0 && idx < 40 {
 				sender = text[:idx]
@@ -852,11 +931,26 @@ func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 			}
 		}
 
+		var thumb []byte
+		if sm.ThumbB64 != "" {
+			thumb, _ = base64.StdEncoding.DecodeString(sm.ThumbB64)
+		}
+
 		msgs = append(msgs, &Message{
+			ID:        sm.ID,
 			Sender:    sender,
 			Text:      text,
 			Timestamp: time.Unix(sm.Timestamp, 0),
 			IsOwn:     sm.FromMe,
+			MediaType: sm.MediaType,
+			MediaPath: sm.MediaPath,
+			Mimetype:  sm.Mimetype,
+			FileName:  sm.FileName,
+			FileSize:  sm.FileSize,
+			Width:     sm.Width,
+			Height:    sm.Height,
+			Duration:  sm.Duration,
+			Thumb:     thumb,
 		})
 	}
 	return msgs
@@ -935,16 +1029,21 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 		}
 	}
 
-	text := msg.Text
-	if text == "" && msg.MediaType != "" && msg.MediaType != "text" {
-		text = "[" + msg.MediaType + "]"
-	}
-
 	newMsg := &Message{
+		ID:        msg.Info.ID,
 		Sender:    senderName,
-		Text:      text,
+		Text:      msg.Text,
 		Timestamp: time.Unix(msg.Timestamp, 0),
 		IsOwn:     msg.Info.IsFromMe,
+		MediaType: msg.MediaType,
+		MediaPath: msg.MediaPath,
+		Mimetype:  msg.Mimetype,
+		FileName:  msg.FileName,
+		FileSize:  msg.FileSize,
+		Width:     msg.Width,
+		Height:    msg.Height,
+		Duration:  msg.Duration,
+		Thumb:     msg.Thumb,
 	}
 	cv.messages[jidStr] = append(cv.messages[jidStr], newMsg)
 	cv.muMessages.Unlock()
