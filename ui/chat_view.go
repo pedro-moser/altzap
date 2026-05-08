@@ -652,20 +652,33 @@ func (cv *ChatView) getLastMessagePreview(path string) string {
 	}
 
 	var lastMsg struct {
-		Text   string `json:"text"`
-		FromMe bool   `json:"from_me"`
+		Text       string `json:"text"`
+		FromMe     bool   `json:"from_me"`
+		SenderName string `json:"sender_name,omitempty"`
+		MediaType  string `json:"media_type,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &lastMsg); err != nil {
 		return ""
 	}
 
-	// Stored format prefixes "<PushName>: <text>"; strip the prefix for a cleaner preview.
 	text := lastMsg.Text
-	if idx := strings.Index(text, ": "); idx >= 0 && idx < 40 {
-		text = text[idx+2:]
+	// Media fallback: if text/caption empty, surface the media type.
+	if text == "" && lastMsg.MediaType != "" {
+		text = "[" + lastMsg.MediaType + "]"
 	}
-	if lastMsg.FromMe {
+
+	// Strip legacy "Name: text" prefix on old records (no sender_name).
+	if lastMsg.SenderName == "" {
+		if idx := strings.Index(text, ": "); idx >= 0 && idx < 40 {
+			text = text[idx+2:]
+		}
+	}
+
+	switch {
+	case lastMsg.FromMe:
 		text = "You: " + text
+	case lastMsg.SenderName != "":
+		text = lastMsg.SenderName + ": " + text
 	}
 	return text
 }
