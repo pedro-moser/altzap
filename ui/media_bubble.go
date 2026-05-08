@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"os/exec"
 	"runtime"
 
@@ -87,11 +88,11 @@ func imageContent(msg *Message) fyne.CanvasObject {
 	return img
 }
 
-func buildImageBubble(msg *Message) fyne.CanvasObject {
+func buildImageBubble(msg *Message, window fyne.Window) fyne.CanvasObject {
 	content := imageContent(msg)
 
 	openBtn := widget.NewButtonWithIcon("Open", theme.ZoomFitIcon(), func() {
-		openExternal(msg.MediaPath)
+		showImageFullscreen(msg.MediaPath, window)
 	})
 	openBtn.Importance = widget.LowImportance
 	if msg.MediaPath == "" {
@@ -107,6 +108,42 @@ func buildImageBubble(msg *Message) fyne.CanvasObject {
 	}
 	rows = append(rows, container.NewHBox(openBtn))
 	return container.NewVBox(rows...)
+}
+
+// showImageFullscreen opens a near-full-window overlay with the image in
+// contain mode. Tapping outside the popup dismisses it; the close button
+// also works. "Open externally" is offered as a secondary action for users
+// who want their OS image viewer.
+func showImageFullscreen(path string, win fyne.Window) {
+	if path == "" || win == nil {
+		return
+	}
+	img := canvas.NewImageFromFile(path)
+	img.FillMode = canvas.ImageFillContain
+
+	var popup *widget.PopUp
+	closeBtn := widget.NewButtonWithIcon("Close", theme.CancelIcon(), func() {
+		if popup != nil {
+			popup.Hide()
+		}
+	})
+	closeBtn.Importance = widget.LowImportance
+
+	openExtBtn := widget.NewButtonWithIcon("Open externally", theme.ZoomFitIcon(), func() {
+		openExternal(path)
+		if popup != nil {
+			popup.Hide()
+		}
+	})
+	openExtBtn.Importance = widget.LowImportance
+
+	bottomBar := container.NewHBox(layout.NewSpacer(), openExtBtn, closeBtn)
+	bg := canvas.NewRectangle(color.RGBA{R: 0x11, G: 0x11, B: 0x1b, A: 0xf0})
+
+	content := container.NewBorder(nil, container.NewPadded(bottomBar), nil, nil, img)
+	popup = widget.NewPopUp(container.NewStack(bg, content), win.Canvas())
+	popup.Resize(win.Canvas().Size())
+	popup.Show()
 }
 
 func buildVideoBubble(msg *Message) fyne.CanvasObject {

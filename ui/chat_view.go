@@ -611,7 +611,7 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 	} else {
 		switch msg.MediaType {
 		case "image":
-			mc := buildImageBubble(msg)
+			mc := buildImageBubble(msg, cv.window)
 			parts = append(parts, mc)
 			if w := mc.MinSize().Width; w > naturalContentWidth {
 				naturalContentWidth = w

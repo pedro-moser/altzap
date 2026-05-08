@@ -41,6 +41,9 @@ func main() {
 		log.Printf("Warning: could not get device: %v", err)
 	}
 
+	// Migrate any pre-circular avatar JPGs to circular PNGs (idempotent).
+	client.MigrateLegacyAvatars()
+
 	waClient := client.NewWhatsAppClient(storeContainer)
 	loginUI := ui.NewLoginUI(fApp, waClient, window)
 	var chatView *ui.ChatView
