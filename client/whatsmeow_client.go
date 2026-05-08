@@ -33,9 +33,9 @@ type SavedReaction struct {
 	Timestamp  int64  `json:"timestamp"`
 }
 
-// savedMessage is the on-disk JSON record for a chat message. New fields are
+// SavedMessage is the on-disk JSON record for a chat message. New fields are
 // all optional so legacy records (text-only, prefixed sender) keep decoding.
-type savedMessage struct {
+type SavedMessage struct {
 	ID         string `json:"id,omitempty"`
 	ChatJID    string `json:"chat_jid"`
 	SenderJID  string `json:"sender_jid"`
@@ -496,7 +496,7 @@ func (w *WhatsAppClient) handleRevoke(msg *events.Message, pmsg *waE2E.ProtocolM
 	}
 	ts := msg.Info.Timestamp.Unix()
 
-	w.patchRecord(chatJID, targetID, func(rec *savedMessage) bool {
+	w.patchRecord(chatJID, targetID, func(rec *SavedMessage) bool {
 		if rec.Deleted {
 			return false
 		}
@@ -537,7 +537,7 @@ func (w *WhatsAppClient) handleEdit(msg *events.Message, pmsg *waE2E.ProtocolMes
 	}
 	ts := msg.Info.Timestamp.Unix()
 
-	w.patchRecord(chatJID, targetID, func(rec *savedMessage) bool {
+	w.patchRecord(chatJID, targetID, func(rec *SavedMessage) bool {
 		if rec.Text == newText && rec.Edited {
 			return false
 		}
@@ -595,7 +595,7 @@ func (w *WhatsAppClient) handleReceipt(r *events.Receipt) {
 	for _, mid := range r.MessageIDs {
 		msgID := string(mid)
 		updated := false
-		w.patchRecord(chatJID, msgID, func(rec *savedMessage) bool {
+		w.patchRecord(chatJID, msgID, func(rec *SavedMessage) bool {
 			if statusRank(status) <= statusRank(rec.Status) {
 				return false
 			}
@@ -632,7 +632,7 @@ func (w *WhatsAppClient) handleReaction(msg *events.Message, rxn *waE2E.Reaction
 	ts := msg.Info.Timestamp.Unix()
 
 	var current []SavedReaction
-	w.patchRecord(chatJID, targetID, func(rec *savedMessage) bool {
+	w.patchRecord(chatJID, targetID, func(rec *SavedMessage) bool {
 		// Drop any prior reaction from this sender.
 		filtered := rec.Reactions[:0]
 		for _, r := range rec.Reactions {
@@ -662,13 +662,13 @@ func (w *WhatsAppClient) handleReaction(msg *events.Message, rxn *waE2E.Reaction
 	}
 }
 
-// persistIncoming writes a savedMessage record for a freshly-arrived event.
+// persistIncoming writes a SavedMessage record for a freshly-arrived event.
 // MediaPath stays empty until downloadAndPatch fills it asynchronously.
 func (w *WhatsAppClient) persistIncoming(msg *events.Message, mediaType, mime, fileName string, size uint64, width, height, duration uint32, thumb []byte, text, replyToID, replyToSenderJID, replyToSenderName, replyToText, replyToMediaType string) {
 	if text == "" && mediaType == "" {
 		return
 	}
-	rec := savedMessage{
+	rec := SavedMessage{
 		ID:                msg.Info.ID,
 		ChatJID:           msg.Info.Chat.String(),
 		SenderJID:         msg.Info.Sender.String(),
@@ -692,7 +692,7 @@ func (w *WhatsAppClient) persistIncoming(msg *events.Message, mediaType, mime, f
 	if len(thumb) > 0 {
 		rec.ThumbB64 = base64.StdEncoding.EncodeToString(thumb)
 	}
-	if err := w.appendMessages(rec.ChatJID, []savedMessage{rec}); err != nil {
+	if err := w.appendMessages(rec.ChatJID, []SavedMessage{rec}); err != nil {
 		log.Printf("persistIncoming: %v", err)
 	}
 }
@@ -743,7 +743,7 @@ func (w *WhatsAppClient) loadMessageIDs(jidStr string) map[string]bool {
 }
 
 // appendMessages writes records to store/msg_<jid>.json, one JSON object per line.
-func (w *WhatsAppClient) appendMessages(jidStr string, msgs []savedMessage) error {
+func (w *WhatsAppClient) appendMessages(jidStr string, msgs []SavedMessage) error {
 	if len(msgs) == 0 {
 		return nil
 	}
@@ -814,7 +814,7 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 		}
 
 		seen := w.loadMessageIDs(jidStr)
-		var batch []savedMessage
+		var batch []SavedMessage
 
 		for _, hm := range hmsgs {
 			wmsg := hm.GetMessage()
@@ -860,7 +860,7 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 				}
 			}
 
-			rec := savedMessage{
+			rec := SavedMessage{
 				ID:                id,
 				ChatJID:           jidStr,
 				SenderJID:         sender,
@@ -925,7 +925,7 @@ func (w *WhatsAppClient) SendMessage(jid types.JID, text string) (string, error)
 		return "", err
 	}
 
-	w.persistOwn(savedMessage{
+	w.persistOwn(SavedMessage{
 		ID:        resp.ID,
 		ChatJID:   jid.String(),
 		Text:      text,
@@ -938,7 +938,7 @@ func (w *WhatsAppClient) SendMessage(jid types.JID, text string) (string, error)
 // persistOwn writes a freshly-sent record to the chat's JSONL. Tolerates
 // being called for the same ID twice (loadMessagesFromDisk dedupes by ID),
 // but normal flow only invokes once per send.
-func (w *WhatsAppClient) persistOwn(rec savedMessage) {
+func (w *WhatsAppClient) persistOwn(rec SavedMessage) {
 	if rec.ChatJID == "" {
 		return
 	}
@@ -948,7 +948,7 @@ func (w *WhatsAppClient) persistOwn(rec savedMessage) {
 	if rec.Timestamp == 0 {
 		rec.Timestamp = time.Now().Unix()
 	}
-	if err := w.appendMessages(rec.ChatJID, []savedMessage{rec}); err != nil {
+	if err := w.appendMessages(rec.ChatJID, []SavedMessage{rec}); err != nil {
 		log.Printf("persistOwn: %v", err)
 	}
 }
@@ -1032,7 +1032,7 @@ func (w *WhatsAppClient) SendImage(jid types.JID, path string, caption string) (
 		return "", err
 	}
 
-	rec := savedMessage{
+	rec := SavedMessage{
 		ID:        sendResp.ID,
 		ChatJID:   jid.String(),
 		Text:      caption,
@@ -1081,7 +1081,7 @@ func (w *WhatsAppClient) SendFile(jid types.JID, path string, filename string) (
 		return "", err
 	}
 
-	w.persistOwn(savedMessage{
+	w.persistOwn(SavedMessage{
 		ID:        sendResp.ID,
 		ChatJID:   jid.String(),
 		Timestamp: sendResp.Timestamp.Unix(),
@@ -1123,7 +1123,7 @@ func (w *WhatsAppClient) SendAudio(jid types.JID, path string) (string, error) {
 		return "", err
 	}
 
-	w.persistOwn(savedMessage{
+	w.persistOwn(SavedMessage{
 		ID:        sendResp.ID,
 		ChatJID:   jid.String(),
 		Timestamp: sendResp.Timestamp.Unix(),
