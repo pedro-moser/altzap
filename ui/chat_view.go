@@ -40,6 +40,15 @@ type Message struct {
 	Height    uint32
 	Duration  uint32
 	Thumb     []byte // raw JPEGThumbnail bytes for instant preview
+
+	// Reply / quote (optional)
+	ReplyToID         string
+	ReplyToSenderName string
+	ReplyToText       string
+	ReplyToMediaType  string
+
+	// Reactions (mutable: updated as reactions come in)
+	Reactions []client.SavedReaction
 }
 
 // Catppuccin-derived semantic colors used by the chat UI.
@@ -172,6 +181,22 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		cv.muMessages.Unlock()
 
 		if chatJID == cv.currentChatJID && cv.messageBox != nil {
+			fyne.Do(func() { cv.refreshMessages() })
+		}
+	}
+
+	// Update in-memory message reactions when a ReactionMessage lands.
+	cv.waClient.OnReactionUpdate = func(upd client.ReactionUpdate) {
+		cv.muMessages.Lock()
+		for _, m := range cv.messages[upd.ChatJID] {
+			if m.ID == upd.MessageID {
+				applyReactionUpdate(m, upd.Reactions)
+				break
+			}
+		}
+		cv.muMessages.Unlock()
+
+		if upd.ChatJID == cv.currentChatJID && cv.messageBox != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
@@ -467,8 +492,15 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 	}
 	bubbleBg.CornerRadius = 8
 
-	parts := make([]fyne.CanvasObject, 0, 4)
+	parts := make([]fyne.CanvasObject, 0, 6)
 	naturalContentWidth := float32(0)
+
+	if reply := buildReplyBox(msg); reply != nil {
+		parts = append(parts, reply)
+		if w := reply.MinSize().Width; w > naturalContentWidth {
+			naturalContentWidth = w
+		}
+	}
 
 	if !msg.IsOwn && msg.Sender != "" && msg.Sender != "Unknown" && msg.Sender != "<nil>" {
 		senderText := canvas.NewText(msg.Sender, avatarColor(msg.Sender))
@@ -525,6 +557,13 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 			if textNatural > naturalContentWidth {
 				naturalContentWidth = textNatural
 			}
+		}
+	}
+
+	if rxn := buildReactionsRow(msg); rxn != nil {
+		parts = append(parts, rxn)
+		if w := rxn.MinSize().Width; w > naturalContentWidth {
+			naturalContentWidth = w
 		}
 	}
 
@@ -963,6 +1002,13 @@ func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 			Height    uint32 `json:"height,omitempty"`
 			Duration  uint32 `json:"duration,omitempty"`
 			ThumbB64  string `json:"thumb_b64,omitempty"`
+
+			ReplyToID         string `json:"reply_to_id,omitempty"`
+			ReplyToSenderName string `json:"reply_to_sender_name,omitempty"`
+			ReplyToText       string `json:"reply_to_text,omitempty"`
+			ReplyToMediaType  string `json:"reply_to_media_type,omitempty"`
+
+			Reactions []client.SavedReaction `json:"reactions,omitempty"`
 		}
 		if err := decoder.Decode(&sm); err != nil {
 			continue
@@ -996,20 +1042,25 @@ func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 		}
 
 		msgs = append(msgs, &Message{
-			ID:        sm.ID,
-			Sender:    sender,
-			Text:      text,
-			Timestamp: time.Unix(sm.Timestamp, 0),
-			IsOwn:     sm.FromMe,
-			MediaType: sm.MediaType,
-			MediaPath: sm.MediaPath,
-			Mimetype:  sm.Mimetype,
-			FileName:  sm.FileName,
-			FileSize:  sm.FileSize,
-			Width:     sm.Width,
-			Height:    sm.Height,
-			Duration:  sm.Duration,
-			Thumb:     thumb,
+			ID:                sm.ID,
+			Sender:            sender,
+			Text:              text,
+			Timestamp:         time.Unix(sm.Timestamp, 0),
+			IsOwn:             sm.FromMe,
+			MediaType:         sm.MediaType,
+			MediaPath:         sm.MediaPath,
+			Mimetype:          sm.Mimetype,
+			FileName:          sm.FileName,
+			FileSize:          sm.FileSize,
+			Width:             sm.Width,
+			Height:            sm.Height,
+			Duration:          sm.Duration,
+			Thumb:             thumb,
+			ReplyToID:         sm.ReplyToID,
+			ReplyToSenderName: sm.ReplyToSenderName,
+			ReplyToText:       sm.ReplyToText,
+			ReplyToMediaType:  sm.ReplyToMediaType,
+			Reactions:         sm.Reactions,
 		})
 	}
 	return msgs
@@ -1089,20 +1140,24 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	}
 
 	newMsg := &Message{
-		ID:        msg.Info.ID,
-		Sender:    senderName,
-		Text:      msg.Text,
-		Timestamp: time.Unix(msg.Timestamp, 0),
-		IsOwn:     msg.Info.IsFromMe,
-		MediaType: msg.MediaType,
-		MediaPath: msg.MediaPath,
-		Mimetype:  msg.Mimetype,
-		FileName:  msg.FileName,
-		FileSize:  msg.FileSize,
-		Width:     msg.Width,
-		Height:    msg.Height,
-		Duration:  msg.Duration,
-		Thumb:     msg.Thumb,
+		ID:                msg.Info.ID,
+		Sender:            senderName,
+		Text:              msg.Text,
+		Timestamp:         time.Unix(msg.Timestamp, 0),
+		IsOwn:             msg.Info.IsFromMe,
+		MediaType:         msg.MediaType,
+		MediaPath:         msg.MediaPath,
+		Mimetype:          msg.Mimetype,
+		FileName:          msg.FileName,
+		FileSize:          msg.FileSize,
+		Width:             msg.Width,
+		Height:            msg.Height,
+		Duration:          msg.Duration,
+		Thumb:             msg.Thumb,
+		ReplyToID:         msg.ReplyToID,
+		ReplyToSenderName: msg.ReplyToSenderName,
+		ReplyToText:       msg.ReplyToText,
+		ReplyToMediaType:  msg.ReplyToMediaType,
 	}
 	cv.messages[jidStr] = append(cv.messages[jidStr], newMsg)
 	cv.muMessages.Unlock()

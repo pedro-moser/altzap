@@ -23,6 +23,15 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// SavedReaction is one user's reaction to a message. WhatsApp allows at most
+// one reaction per user per message; setting an empty emoji removes it.
+type SavedReaction struct {
+	Emoji      string `json:"emoji"`
+	SenderJID  string `json:"sender_jid"`
+	SenderName string `json:"sender_name,omitempty"`
+	Timestamp  int64  `json:"timestamp"`
+}
+
 // savedMessage is the on-disk JSON record for a chat message. New fields are
 // all optional so legacy records (text-only, prefixed sender) keep decoding.
 type savedMessage struct {
@@ -44,6 +53,16 @@ type savedMessage struct {
 	Height    uint32 `json:"height,omitempty"`
 	Duration  uint32 `json:"duration,omitempty"`  // seconds
 	ThumbB64  string `json:"thumb_b64,omitempty"` // JPEGThumbnail base64 for instant preview
+
+	// Reply / quote (optional). Non-empty ReplyToID = this message quotes another.
+	ReplyToID         string `json:"reply_to_id,omitempty"`
+	ReplyToSenderJID  string `json:"reply_to_sender_jid,omitempty"`
+	ReplyToSenderName string `json:"reply_to_sender_name,omitempty"`
+	ReplyToText       string `json:"reply_to_text,omitempty"`
+	ReplyToMediaType  string `json:"reply_to_media_type,omitempty"`
+
+	// Reactions, accumulated as users react. Persisted across restarts.
+	Reactions []SavedReaction `json:"reactions,omitempty"`
 }
 
 type LoginCallback func()
@@ -67,6 +86,20 @@ type MessageEvent struct {
 	Height    uint32
 	Duration  uint32
 	Thumb     []byte // raw JPEGThumbnail bytes
+
+	// Reply / quote (optional)
+	ReplyToID         string
+	ReplyToSenderJID  string
+	ReplyToSenderName string
+	ReplyToText       string
+	ReplyToMediaType  string
+}
+
+// ReactionUpdate carries a single reaction-change for the UI to refresh in place.
+type ReactionUpdate struct {
+	ChatJID   string
+	MessageID string
+	Reactions []SavedReaction // current full list for that message after the update
 }
 
 // Contact represents a contact in the user's contact list
@@ -89,22 +122,23 @@ type Chat struct {
 
 // WhatsAppClient wraps the whatsmeow client with higher-level operations
 type WhatsAppClient struct {
-	client          *whatsmeow.Client
-	store           *sqlstore.Container
-	OnMessage       func(MessageEvent)
-	OnLogin         LoginCallback
-	OnHistoryUpdate func()
-	OnMediaReady    func(chatJID, msgID, mediaPath string) // fires when an async download finishes
-	muChannels      sync.RWMutex
-	ContactCache    map[string]Contact
-	muContacts      sync.RWMutex
-	muMessages      sync.Mutex
-	messages        map[string][]MessageEvent
-	chatRegistry    map[string]string // jid -> display name
-	muChats         sync.RWMutex
-	groupCache      map[string]string // jid -> group name
-	muGroups        sync.RWMutex
-	muStoreFile     sync.Mutex // serialize writes to store/*.json
+	client            *whatsmeow.Client
+	store             *sqlstore.Container
+	OnMessage         func(MessageEvent)
+	OnLogin           LoginCallback
+	OnHistoryUpdate   func()
+	OnMediaReady      func(chatJID, msgID, mediaPath string) // fires when an async download finishes
+	OnReactionUpdate  func(ReactionUpdate)                   // fires when a reaction is added/removed
+	muChannels        sync.RWMutex
+	ContactCache      map[string]Contact
+	muContacts        sync.RWMutex
+	muMessages        sync.Mutex
+	messages          map[string][]MessageEvent
+	chatRegistry      map[string]string // jid -> display name
+	muChats           sync.RWMutex
+	groupCache        map[string]string // jid -> group name
+	muGroups          sync.RWMutex
+	muStoreFile       sync.Mutex // serialize writes to store/*.json
 }
 
 // NewWhatsAppClient creates a new WhatsApp client instance
@@ -208,6 +242,51 @@ func (w *WhatsAppClient) WaitUntilLoggedIn() bool {
 }
 
 
+// extractContext returns the ContextInfo of whichever message variant is set.
+// ContextInfo carries reply (QuotedMessage), mentions, and forward state.
+func extractContext(m *waE2E.Message) *waE2E.ContextInfo {
+	if m == nil {
+		return nil
+	}
+	switch {
+	case m.ExtendedTextMessage != nil:
+		return m.ExtendedTextMessage.GetContextInfo()
+	case m.ImageMessage != nil:
+		return m.ImageMessage.GetContextInfo()
+	case m.VideoMessage != nil:
+		return m.VideoMessage.GetContextInfo()
+	case m.AudioMessage != nil:
+		return m.AudioMessage.GetContextInfo()
+	case m.DocumentMessage != nil:
+		return m.DocumentMessage.GetContextInfo()
+	case m.StickerMessage != nil:
+		return m.StickerMessage.GetContextInfo()
+	}
+	return nil
+}
+
+// extractReply pulls quote metadata from a ContextInfo. Returns empty values
+// when the message isn't a reply.
+func extractReply(ctx *waE2E.ContextInfo) (id, senderJID, senderName, text, mediaType string) {
+	if ctx == nil {
+		return
+	}
+	quoted := ctx.GetQuotedMessage()
+	if quoted == nil {
+		return
+	}
+	id = ctx.GetStanzaID()
+	senderJID = ctx.GetParticipant()
+
+	text = extractText(quoted)
+	mt, _, _, _, _, _, _, _, caption := extractMedia(quoted)
+	mediaType = mt
+	if text == "" {
+		text = caption
+	}
+	return
+}
+
 // extractMedia inspects a whatsmeow Message proto and returns media metadata
 // suitable for persistence and UI rendering. mediaType is "" for plain text.
 func extractMedia(m *waE2E.Message) (mediaType, mime, fileName string, size uint64, w, h, dur uint32, thumb []byte, caption string) {
@@ -272,6 +351,14 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 		return
 	}
 
+	// Reactions are delivered as Message events with ReactionMessage set.
+	// They reference an existing message by stanza ID — no UI bubble of their
+	// own; we patch the target's persisted record and notify the UI.
+	if rxn := msg.Message.GetReactionMessage(); rxn != nil {
+		w.handleReaction(msg, rxn)
+		return
+	}
+
 	ts := msg.Info.Timestamp
 	sender := msg.Info.Sender
 
@@ -280,22 +367,34 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 	if text == "" {
 		text = caption
 	}
+	rid, rsenderJID, _, rtext, rmediaType := extractReply(extractContext(msg.Message))
+	rsenderName := ""
+	if rsenderJID != "" {
+		if jid, err := types.ParseJID(rsenderJID); err == nil {
+			rsenderName = w.LookupName(jid)
+		}
+	}
 
 	messageEvent := MessageEvent{
-		Info:       msg.Info,
-		Text:       text,
-		SenderName: msg.Info.PushName,
-		SenderJid:  sender,
-		Timestamp:  ts.Unix(),
-		IsGroup:    msg.Info.IsGroup,
-		MediaType:  mediaType,
-		Mimetype:   mime,
-		FileName:   fileName,
-		FileSize:   size,
-		Width:      mw,
-		Height:     mh,
-		Duration:   dur,
-		Thumb:      thumb,
+		Info:              msg.Info,
+		Text:              text,
+		SenderName:        msg.Info.PushName,
+		SenderJid:         sender,
+		Timestamp:         ts.Unix(),
+		IsGroup:           msg.Info.IsGroup,
+		MediaType:         mediaType,
+		Mimetype:          mime,
+		FileName:          fileName,
+		FileSize:          size,
+		Width:             mw,
+		Height:            mh,
+		Duration:          dur,
+		Thumb:             thumb,
+		ReplyToID:         rid,
+		ReplyToSenderJID:  rsenderJID,
+		ReplyToSenderName: rsenderName,
+		ReplyToText:       rtext,
+		ReplyToMediaType:  rmediaType,
 	}
 
 	w.muChats.Lock()
@@ -309,7 +408,8 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 	}
 	w.muChats.Unlock()
 
-	w.persistIncoming(msg, mediaType, mime, fileName, size, mw, mh, dur, thumb, text)
+	w.persistIncoming(msg, mediaType, mime, fileName, size, mw, mh, dur, thumb, text,
+		rid, rsenderJID, rsenderName, rtext, rmediaType)
 
 	if w.OnMessage != nil {
 		w.OnMessage(messageEvent)
@@ -330,27 +430,81 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 	}
 }
 
+// handleReaction updates the target message's Reactions list. WhatsApp's
+// model: each user has ≤1 reaction per message; an empty emoji removes the
+// existing one. We patch the JSONL atomically and fire OnReactionUpdate.
+func (w *WhatsAppClient) handleReaction(msg *events.Message, rxn *waE2E.ReactionMessage) {
+	key := rxn.GetKey()
+	targetID := key.GetID()
+	chatJID := msg.Info.Chat.String()
+	if targetID == "" {
+		return
+	}
+	emoji := rxn.GetText()
+	senderJID := msg.Info.Sender.String()
+	senderName := msg.Info.PushName
+	if senderName == "" {
+		senderName = w.LookupName(msg.Info.Sender)
+	}
+	ts := msg.Info.Timestamp.Unix()
+
+	var current []SavedReaction
+	w.patchRecord(chatJID, targetID, func(rec *savedMessage) bool {
+		// Drop any prior reaction from this sender.
+		filtered := rec.Reactions[:0]
+		for _, r := range rec.Reactions {
+			if r.SenderJID != senderJID {
+				filtered = append(filtered, r)
+			}
+		}
+		if emoji != "" {
+			filtered = append(filtered, SavedReaction{
+				Emoji:      emoji,
+				SenderJID:  senderJID,
+				SenderName: senderName,
+				Timestamp:  ts,
+			})
+		}
+		rec.Reactions = filtered
+		current = filtered
+		return true
+	})
+
+	if w.OnReactionUpdate != nil {
+		w.OnReactionUpdate(ReactionUpdate{
+			ChatJID:   chatJID,
+			MessageID: targetID,
+			Reactions: current,
+		})
+	}
+}
+
 // persistIncoming writes a savedMessage record for a freshly-arrived event.
 // MediaPath stays empty until downloadAndPatch fills it asynchronously.
-func (w *WhatsAppClient) persistIncoming(msg *events.Message, mediaType, mime, fileName string, size uint64, width, height, duration uint32, thumb []byte, text string) {
+func (w *WhatsAppClient) persistIncoming(msg *events.Message, mediaType, mime, fileName string, size uint64, width, height, duration uint32, thumb []byte, text, replyToID, replyToSenderJID, replyToSenderName, replyToText, replyToMediaType string) {
 	if text == "" && mediaType == "" {
 		return
 	}
 	rec := savedMessage{
-		ID:         msg.Info.ID,
-		ChatJID:    msg.Info.Chat.String(),
-		SenderJID:  msg.Info.Sender.String(),
-		SenderName: msg.Info.PushName,
-		Text:       text,
-		Timestamp:  msg.Info.Timestamp.Unix(),
-		FromMe:     msg.Info.IsFromMe,
-		MediaType:  mediaType,
-		Mimetype:   mime,
-		FileName:   fileName,
-		FileSize:   size,
-		Width:      width,
-		Height:     height,
-		Duration:   duration,
+		ID:                msg.Info.ID,
+		ChatJID:           msg.Info.Chat.String(),
+		SenderJID:         msg.Info.Sender.String(),
+		SenderName:        msg.Info.PushName,
+		Text:              text,
+		Timestamp:         msg.Info.Timestamp.Unix(),
+		FromMe:            msg.Info.IsFromMe,
+		MediaType:         mediaType,
+		Mimetype:          mime,
+		FileName:          fileName,
+		FileSize:          size,
+		Width:             width,
+		Height:            height,
+		Duration:          duration,
+		ReplyToID:         replyToID,
+		ReplyToSenderJID:  replyToSenderJID,
+		ReplyToSenderName: replyToSenderName,
+		ReplyToText:       replyToText,
+		ReplyToMediaType:  replyToMediaType,
 	}
 	if len(thumb) > 0 {
 		rec.ThumbB64 = base64.StdEncoding.EncodeToString(thumb)
@@ -485,6 +639,12 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 				continue
 			}
 			body := wmsg.GetMessage()
+			// Skip reaction-only messages — those reference an earlier message
+			// by ID, and HistorySync may deliver them out of order. We let the
+			// real-time handleReaction path cover live reactions instead.
+			if body.GetReactionMessage() != nil {
+				continue
+			}
 			text := extractText(body)
 			mediaType, mime, fileName, size, mw, mh, dur, thumb, caption := extractMedia(body)
 			if text == "" {
@@ -509,21 +669,34 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 			}
 			pushName := wmsg.GetPushName()
 
+			rid, rsenderJID, _, rtext, rmediaType := extractReply(extractContext(body))
+			rsenderName := ""
+			if rsenderJID != "" {
+				if rsj, err := types.ParseJID(rsenderJID); err == nil {
+					rsenderName = w.LookupName(rsj)
+				}
+			}
+
 			rec := savedMessage{
-				ID:         id,
-				ChatJID:    jidStr,
-				SenderJID:  sender,
-				SenderName: pushName,
-				Text:       text,
-				Timestamp:  int64(wmsg.GetMessageTimestamp()),
-				FromMe:     key.GetFromMe(),
-				MediaType:  mediaType,
-				Mimetype:   mime,
-				FileName:   fileName,
-				FileSize:   size,
-				Width:      mw,
-				Height:     mh,
-				Duration:   dur,
+				ID:                id,
+				ChatJID:           jidStr,
+				SenderJID:         sender,
+				SenderName:        pushName,
+				Text:              text,
+				Timestamp:         int64(wmsg.GetMessageTimestamp()),
+				FromMe:            key.GetFromMe(),
+				MediaType:         mediaType,
+				Mimetype:          mime,
+				FileName:          fileName,
+				FileSize:          size,
+				Width:             mw,
+				Height:            mh,
+				Duration:          dur,
+				ReplyToID:         rid,
+				ReplyToSenderJID:  rsenderJID,
+				ReplyToSenderName: rsenderName,
+				ReplyToText:       rtext,
+				ReplyToMediaType:  rmediaType,
 			}
 			if len(thumb) > 0 {
 				rec.ThumbB64 = base64.StdEncoding.EncodeToString(thumb)

@@ -152,9 +152,23 @@ func (w *WhatsAppClient) fireMediaReady(chatJID, msgID, path string) {
 	}
 }
 
-// patchMediaPath rewrites the chat's JSONL to set MediaPath on the matching
-// record. Atomic via temp-file rename. Falls back gracefully on any I/O issue.
+// patchMediaPath sets MediaPath on the matching record (if currently empty).
+// Convenience wrapper around patchRecord — same semantics as before.
 func (w *WhatsAppClient) patchMediaPath(chatJID, msgID, path string) {
+	w.patchRecord(chatJID, msgID, func(rec *savedMessage) bool {
+		if rec.MediaPath != "" {
+			return false
+		}
+		rec.MediaPath = path
+		return true
+	})
+}
+
+// patchRecord finds the message record matching msgID in the chat's JSONL,
+// applies mutate, and rewrites the file atomically (temp + rename) only if
+// mutate returned true. Used for media-path fills, reaction updates, and
+// future edit/delete features.
+func (w *WhatsAppClient) patchRecord(chatJID, msgID string, mutate func(*savedMessage) bool) {
 	w.muStoreFile.Lock()
 	defer w.muStoreFile.Unlock()
 
@@ -180,9 +194,10 @@ func (w *WhatsAppClient) patchMediaPath(chatJID, msgID, path string) {
 		if err := dec.Decode(&rec); err != nil {
 			continue
 		}
-		if rec.ID == msgID && rec.MediaPath == "" {
-			rec.MediaPath = path
-			patched = true
+		if rec.ID == msgID {
+			if mutate(&rec) {
+				patched = true
+			}
 		}
 		if err := enc.Encode(&rec); err != nil {
 			tmp.Close()

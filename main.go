@@ -24,6 +24,13 @@ func main() {
 	window.SetMaster()
 	window.Resize(fyne.NewSize(1050, 700))
 
+	// Ctrl+Q always quits, even if the tray failed to register (so the user
+	// is never stuck after a close-to-tray on a desktop without a SNI host).
+	window.Canvas().AddShortcut(&desktop.CustomShortcut{
+		KeyName:  fyne.KeyQ,
+		Modifier: fyne.KeyModifierControl,
+	}, func(_ fyne.Shortcut) { fApp.Quit() })
+
 	logger := waLog.Stdout("Main", "INFO", false)
 	storeContainer, err := sqlstore.New(context.Background(), "sqlite3", "whatsapp.db?_foreign_keys=on", logger)
 	if err != nil {
