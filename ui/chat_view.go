@@ -20,7 +20,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"go.mau.fi/whatsmeow/types"
-	"whatsappalt/client"
+	"altzap/client"
 )
 
 type Message struct {
@@ -357,11 +357,11 @@ func (cv *ChatView) Build() fyne.CanvasObject {
 func (cv *ChatView) buildPlaceholder() fyne.CanvasObject {
 	bg := canvas.NewRectangle(ctpBase)
 
-	icon := canvas.NewImageFromResource(theme.MailComposeIcon())
+	icon := canvas.NewImageFromResource(AppIcon)
 	icon.FillMode = canvas.ImageFillContain
 	icon.SetMinSize(fyne.NewSize(96, 96))
 
-	title := canvas.NewText("WhatsApp Alt", emptyHintColor)
+	title := canvas.NewText("AltZap", emptyHintColor)
 	title.TextSize = 28
 	title.TextStyle.Bold = true
 	title.Alignment = fyne.TextAlignCenter

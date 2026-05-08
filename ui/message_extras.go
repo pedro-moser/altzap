@@ -9,7 +9,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
-	"whatsappalt/client"
+	"altzap/client"
 )
 
 // buildReplyBox renders a small framed area shown above a bubble's content

@@ -43,7 +43,7 @@ func Notify(summary, body string) {
 		return
 	}
 	if summary == "" {
-		summary = "WhatsApp Alt"
+		summary = "AltZap"
 	}
 	body = strings.ReplaceAll(body, "\x00", "")
 
@@ -62,7 +62,7 @@ func Notify(summary, body string) {
 		// -a sets the app name (visible in some notification daemons).
 		// -t expires after 5s; -u normal urgency.
 		cmd := exec.Command(notifySendPath,
-			"-a", "WhatsApp Alt",
+			"-a", "AltZap",
 			"-u", "normal",
 			"-t", "5000",
 			summary,

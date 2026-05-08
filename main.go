@@ -8,19 +8,18 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/driver/desktop"
-	"fyne.io/fyne/v2/theme"
 	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
-	"whatsappalt/client"
-	"whatsappalt/ui"
+	"altzap/client"
+	"altzap/ui"
 )
 
 func main() {
-	fApp := app.NewWithID("com.wazegoo.whatsapp")
+	fApp := app.NewWithID("com.altzap.app")
 	fApp.Settings().SetTheme(ui.CatppuccinTheme())
 
-	window := fApp.NewWindow("WhatsApp Alt")
+	window := fApp.NewWindow("AltZap")
 	window.SetMaster()
 	window.Resize(fyne.NewSize(1050, 700))
 
@@ -56,9 +55,9 @@ func main() {
 			window.RequestFocus()
 		})
 		quitItem := fyne.NewMenuItem("Quit", func() { fApp.Quit() })
-		trayMenu := fyne.NewMenu("WhatsApp Alt", showItem, fyne.NewMenuItemSeparator(), quitItem)
+		trayMenu := fyne.NewMenu("AltZap", showItem, fyne.NewMenuItemSeparator(), quitItem)
 		desk.SetSystemTrayMenu(trayMenu)
-		desk.SetSystemTrayIcon(theme.MailComposeIcon())
+		desk.SetSystemTrayIcon(ui.AppIcon)
 
 		window.SetCloseIntercept(func() { window.Hide() })
 	}
@@ -70,9 +69,9 @@ func main() {
 			ui.NotifyMessage(sender, chatName, preview, isGroup)
 		})
 		cv.SetTotalUnreadHook(func(total int) {
-			title := "WhatsApp Alt"
+			title := "AltZap"
 			if total > 0 {
-				title = fmt.Sprintf("WhatsApp Alt (%d)", total)
+				title = fmt.Sprintf("AltZap (%d)", total)
 			}
 			fyne.Do(func() { window.SetTitle(title) })
 		})

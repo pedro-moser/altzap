@@ -18,7 +18,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/skip2/go-qrcode"
-	"whatsappalt/client"
+	"altzap/client"
 )
 
 type qrState struct {
@@ -72,15 +72,12 @@ func (l *LoginUI) buildLoginView() fyne.CanvasObject {
 	cardBg := canvas.NewRectangle(theme.Color(theme.ColorNameButton))
 	cardBg.CornerRadius = 16
 
-	logoCircle := canvas.NewCircle(theme.PrimaryColor())
-	logoCircle.Resize(fyne.NewSize(80, 80))
-
-	logoIcon := canvas.NewImageFromResource(theme.MailComposeIcon())
+	logoIcon := canvas.NewImageFromResource(AppIcon)
 	logoIcon.FillMode = canvas.ImageFillContain
-	logoIcon.SetMinSize(fyne.NewSize(40, 40))
-	logoIconContainer := container.NewStack(logoCircle, container.NewCenter(logoIcon))
+	logoIcon.SetMinSize(fyne.NewSize(96, 96))
+	logoIconContainer := container.NewCenter(logoIcon)
 
-	title := widget.NewLabel("WhatsApp Alt")
+	title := widget.NewLabel("AltZap")
 	title.TextStyle.Bold = true
 	title.Alignment = fyne.TextAlignCenter
 	title.Wrapping = fyne.TextWrapWord

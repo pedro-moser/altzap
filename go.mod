@@ -1,4 +1,4 @@
-module whatsappalt
+module altzap
 
 go 1.26.2
 
