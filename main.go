@@ -22,6 +22,8 @@ func main() {
 	window := fApp.NewWindow("AltZap")
 	window.SetMaster()
 	window.Resize(fyne.NewSize(1050, 700))
+	window.SetIcon(ui.AppIcon)
+	fApp.SetIcon(ui.AppIcon)
 
 	// Ctrl+Q always quits, even if the tray failed to register (so the user
 	// is never stuck after a close-to-tray on a desktop without a SNI host).
@@ -116,6 +118,7 @@ func main() {
 		if chatView != nil {
 			chatView.StopRecordingIfActive()
 		}
+		ui.StopAudioIfActive()
 		waClient.Disconnect()
 	})
 

@@ -202,10 +202,37 @@ func buildAudioBubble(msg *Message) fyne.CanvasObject {
 	label := widget.NewLabel(durTxt)
 	label.TextStyle.Monospace = true
 
-	playBtn := widget.NewButtonWithIcon("", theme.MediaPlayIcon(), func() {
-		openExternal(msg.MediaPath)
+	var playBtn *widget.Button
+	setIcon := func(playing bool) {
+		if playBtn == nil {
+			return
+		}
+		if playing {
+			playBtn.SetIcon(theme.MediaStopIcon())
+		} else {
+			playBtn.SetIcon(theme.MediaPlayIcon())
+		}
+	}
+
+	playBtn = widget.NewButtonWithIcon("", theme.MediaPlayIcon(), func() {
+		if isPlayingMsg(msg.ID) {
+			stopAudio()
+			return
+		}
+		if err := playAudio(msg.ID, msg.MediaPath, setIcon); err != nil {
+			// Silent fall-through; button stays in the play state. We could
+			// surface a dialog but the most common cause (no ffplay) is fixed
+			// once and then the button works for the session.
+			return
+		}
 	})
-	if msg.MediaPath == "" {
+
+	// Reflect the live controller state when the bubble is rebuilt mid-play
+	// (e.g. after a sibling chat refresh).
+	if isPlayingMsg(msg.ID) {
+		playBtn.SetIcon(theme.MediaStopIcon())
+	}
+	if msg.MediaPath == "" || !hasFFplay {
 		playBtn.Disable()
 	}
 
