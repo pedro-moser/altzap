@@ -167,3 +167,69 @@ func TestInsertBatch_EmptySliceIsNoOp(t *testing.T) {
 		t.Fatalf("InsertBatch([]): %v", err)
 	}
 }
+
+func TestPatch_MissingRecordIsNoOp(t *testing.T) {
+	s := openTestStore(t)
+	called := false
+	err := s.Patch("nope@s.whatsapp.net", "MISSING", func(rec *SavedMessage) bool {
+		called = true
+		return true
+	})
+	if err != nil {
+		t.Fatalf("Patch on missing: %v", err)
+	}
+	if called {
+		t.Errorf("mutate fn should not be called when record is missing")
+	}
+}
+
+func TestPatch_MutateReturnsFalseLeavesRecord(t *testing.T) {
+	s := openTestStore(t)
+	rec := SavedMessage{
+		ChatJID: "c@x", ID: "M1", Text: "original", Timestamp: 100, Status: "",
+	}
+	if err := s.Insert(rec); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	err := s.Patch("c@x", "M1", func(r *SavedMessage) bool {
+		r.Status = "delivered" // would mutate, but we say no
+		return false
+	})
+	if err != nil {
+		t.Fatalf("Patch: %v", err)
+	}
+	got, _ := s.LoadChat("c@x")
+	if got[0].Status != "" {
+		t.Errorf("Status should be unchanged, got %q", got[0].Status)
+	}
+	if got[0].Text != "original" {
+		t.Errorf("Text should be unchanged, got %q", got[0].Text)
+	}
+}
+
+func TestPatch_MutateReturnsTrueWritesUpdate(t *testing.T) {
+	s := openTestStore(t)
+	rec := SavedMessage{
+		ChatJID: "c@x", ID: "M1", Text: "original", Timestamp: 100,
+	}
+	if err := s.Insert(rec); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	err := s.Patch("c@x", "M1", func(r *SavedMessage) bool {
+		r.Status = "read"
+		r.Reactions = []SavedReaction{
+			{Emoji: "👍", SenderJID: "alice@x", SenderName: "Alice", Timestamp: 200},
+		}
+		return true
+	})
+	if err != nil {
+		t.Fatalf("Patch: %v", err)
+	}
+	got, _ := s.LoadChat("c@x")
+	if got[0].Status != "read" {
+		t.Errorf("Status: want 'read', got %q", got[0].Status)
+	}
+	if len(got[0].Reactions) != 1 || got[0].Reactions[0].Emoji != "👍" {
+		t.Errorf("Reactions not persisted: %+v", got[0].Reactions)
+	}
+}

@@ -194,3 +194,55 @@ func (s *MessageStore) LoadChat(chatJID string) ([]SavedMessage, error) {
 	}
 	return out, rows.Err()
 }
+
+const selectOneSQL = `SELECT chat_jid, id, sender_jid, sender_name, text, ts, from_me,
+    media_type, media_path, mimetype, filename, file_size, width, height, duration, thumb_b64,
+    reply_to_id, reply_to_sender_jid, reply_to_sender_name, reply_to_text, reply_to_media_type,
+    reactions_json, edited, edited_at, deleted, deleted_at, status
+    FROM messages WHERE chat_jid = ? AND id = ?`
+
+const updateSQL = `UPDATE messages SET
+    sender_jid = ?, sender_name = ?, text = ?, ts = ?, from_me = ?,
+    media_type = ?, media_path = ?, mimetype = ?, filename = ?, file_size = ?, width = ?, height = ?, duration = ?, thumb_b64 = ?,
+    reply_to_id = ?, reply_to_sender_jid = ?, reply_to_sender_name = ?, reply_to_text = ?, reply_to_media_type = ?,
+    reactions_json = ?, edited = ?, edited_at = ?, deleted = ?, deleted_at = ?, status = ?
+    WHERE chat_jid = ? AND id = ?`
+
+// Patch loads the record matching (chatJID, msgID), passes it to fn,
+// and writes back only if fn returns true. Mirrors the semantics of
+// the previous patchRecord on JSONL files. Missing records are silent
+// no-ops (matches old behavior — patchRecord just returned).
+func (s *MessageStore) Patch(chatJID, msgID string, fn func(*SavedMessage) bool) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rec, err := scanMessage(tx.QueryRow(selectOneSQL, chatJID, msgID))
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if !fn(&rec) {
+		return nil
+	}
+
+	rj, err := reactionsJSON(rec.Reactions)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(updateSQL,
+		rec.SenderJID, rec.SenderName, rec.Text, rec.Timestamp, boolToInt(rec.FromMe),
+		rec.MediaType, rec.MediaPath, rec.Mimetype, rec.FileName, rec.FileSize, rec.Width, rec.Height, rec.Duration, rec.ThumbB64,
+		rec.ReplyToID, rec.ReplyToSenderJID, rec.ReplyToSenderName, rec.ReplyToText, rec.ReplyToMediaType,
+		rj, boolToInt(rec.Edited), rec.EditedAt, boolToInt(rec.Deleted), rec.DeletedAt, rec.Status,
+		chatJID, msgID,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
