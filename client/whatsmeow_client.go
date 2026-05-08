@@ -63,6 +63,12 @@ type savedMessage struct {
 
 	// Reactions, accumulated as users react. Persisted across restarts.
 	Reactions []SavedReaction `json:"reactions,omitempty"`
+
+	// Mutations after delivery (edited / deleted-for-everyone).
+	Edited    bool  `json:"edited,omitempty"`
+	EditedAt  int64 `json:"edited_at,omitempty"`
+	Deleted   bool  `json:"deleted,omitempty"`
+	DeletedAt int64 `json:"deleted_at,omitempty"`
 }
 
 type LoginCallback func()
@@ -102,6 +108,21 @@ type ReactionUpdate struct {
 	Reactions []SavedReaction // current full list for that message after the update
 }
 
+// MessageEdit signals an in-place text update for an existing message.
+type MessageEdit struct {
+	ChatJID   string
+	MessageID string
+	NewText   string
+	EditedAt  int64
+}
+
+// MessageDelete signals a "delete for everyone" applied to an existing message.
+type MessageDelete struct {
+	ChatJID   string
+	MessageID string
+	DeletedAt int64
+}
+
 // Contact represents a contact in the user's contact list
 type Contact struct {
 	JID        types.JID
@@ -129,6 +150,8 @@ type WhatsAppClient struct {
 	OnHistoryUpdate   func()
 	OnMediaReady      func(chatJID, msgID, mediaPath string) // fires when an async download finishes
 	OnReactionUpdate  func(ReactionUpdate)                   // fires when a reaction is added/removed
+	OnMessageEdit     func(MessageEdit)                      // fires when a message's text was edited
+	OnMessageDelete   func(MessageDelete)                    // fires on "delete for everyone"
 	muChannels        sync.RWMutex
 	ContactCache      map[string]Contact
 	muContacts        sync.RWMutex
@@ -351,6 +374,22 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 		return
 	}
 
+	// Mutating events (revoke / edit) come as ProtocolMessage. They reference
+	// an existing stanza ID and don't have a bubble of their own.
+	if pmsg := msg.Message.GetProtocolMessage(); pmsg != nil {
+		switch pmsg.GetType() {
+		case waE2E.ProtocolMessage_REVOKE:
+			w.handleRevoke(msg, pmsg)
+			return
+		case waE2E.ProtocolMessage_MESSAGE_EDIT:
+			w.handleEdit(msg, pmsg)
+			return
+		}
+		// Other protocol types (key shares, ephemeral settings, app-state) are
+		// internal to whatsmeow's bookkeeping; ignore.
+		return
+	}
+
 	// Reactions are delivered as Message events with ReactionMessage set.
 	// They reference an existing message by stanza ID — no UI bubble of their
 	// own; we patch the target's persisted record and notify the UI.
@@ -427,6 +466,79 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 
 	if mediaType != "" {
 		go w.downloadAndPatch(msg)
+	}
+}
+
+// handleRevoke marks the target message as deleted-for-everyone. The actual
+// content stays in the JSONL (so we have a record), but UI hides it behind a
+// "this message was deleted" placeholder.
+func (w *WhatsAppClient) handleRevoke(msg *events.Message, pmsg *waE2E.ProtocolMessage) {
+	key := pmsg.GetKey()
+	targetID := key.GetID()
+	chatJID := msg.Info.Chat.String()
+	if targetID == "" {
+		return
+	}
+	ts := msg.Info.Timestamp.Unix()
+
+	w.patchRecord(chatJID, targetID, func(rec *savedMessage) bool {
+		if rec.Deleted {
+			return false
+		}
+		rec.Deleted = true
+		rec.DeletedAt = ts
+		return true
+	})
+
+	if w.OnMessageDelete != nil {
+		w.OnMessageDelete(MessageDelete{
+			ChatJID:   chatJID,
+			MessageID: targetID,
+			DeletedAt: ts,
+		})
+	}
+}
+
+// handleEdit updates the target message's text in place. The new content is
+// in pmsg.EditedMessage (a Message proto). We only update the visible text;
+// media and other metadata stay untouched (WhatsApp doesn't allow editing
+// media — only captions and text).
+func (w *WhatsAppClient) handleEdit(msg *events.Message, pmsg *waE2E.ProtocolMessage) {
+	key := pmsg.GetKey()
+	targetID := key.GetID()
+	chatJID := msg.Info.Chat.String()
+	if targetID == "" {
+		return
+	}
+	edited := pmsg.GetEditedMessage()
+	if edited == nil {
+		return
+	}
+	newText := extractText(edited)
+	if newText == "" {
+		// Edit might be of a media caption — recover from extractMedia.
+		_, _, _, _, _, _, _, _, caption := extractMedia(edited)
+		newText = caption
+	}
+	ts := msg.Info.Timestamp.Unix()
+
+	w.patchRecord(chatJID, targetID, func(rec *savedMessage) bool {
+		if rec.Text == newText && rec.Edited {
+			return false
+		}
+		rec.Text = newText
+		rec.Edited = true
+		rec.EditedAt = ts
+		return true
+	})
+
+	if w.OnMessageEdit != nil {
+		w.OnMessageEdit(MessageEdit{
+			ChatJID:   chatJID,
+			MessageID: targetID,
+			NewText:   newText,
+			EditedAt:  ts,
+		})
 	}
 }
 

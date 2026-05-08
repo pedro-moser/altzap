@@ -49,6 +49,10 @@ type Message struct {
 
 	// Reactions (mutable: updated as reactions come in)
 	Reactions []client.SavedReaction
+
+	// Mutations after delivery (mutable)
+	Edited  bool
+	Deleted bool
 }
 
 // Catppuccin-derived semantic colors used by the chat UI.
@@ -191,6 +195,39 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		for _, m := range cv.messages[upd.ChatJID] {
 			if m.ID == upd.MessageID {
 				applyReactionUpdate(m, upd.Reactions)
+				break
+			}
+		}
+		cv.muMessages.Unlock()
+
+		if upd.ChatJID == cv.currentChatJID && cv.messageBox != nil {
+			fyne.Do(func() { cv.refreshMessages() })
+		}
+	}
+
+	// Edit: replace text in place + flag.
+	cv.waClient.OnMessageEdit = func(upd client.MessageEdit) {
+		cv.muMessages.Lock()
+		for _, m := range cv.messages[upd.ChatJID] {
+			if m.ID == upd.MessageID {
+				m.Text = upd.NewText
+				m.Edited = true
+				break
+			}
+		}
+		cv.muMessages.Unlock()
+
+		if upd.ChatJID == cv.currentChatJID && cv.messageBox != nil {
+			fyne.Do(func() { cv.refreshMessages() })
+		}
+	}
+
+	// Delete-for-everyone: flag the message; UI swaps to placeholder.
+	cv.waClient.OnMessageDelete = func(upd client.MessageDelete) {
+		cv.muMessages.Lock()
+		for _, m := range cv.messages[upd.ChatJID] {
+			if m.ID == upd.MessageID {
+				m.Deleted = true
 				break
 			}
 		}
@@ -495,10 +532,12 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 	parts := make([]fyne.CanvasObject, 0, 6)
 	naturalContentWidth := float32(0)
 
-	if reply := buildReplyBox(msg); reply != nil {
-		parts = append(parts, reply)
-		if w := reply.MinSize().Width; w > naturalContentWidth {
-			naturalContentWidth = w
+	if !msg.Deleted {
+		if reply := buildReplyBox(msg); reply != nil {
+			parts = append(parts, reply)
+			if w := reply.MinSize().Width; w > naturalContentWidth {
+				naturalContentWidth = w
+			}
 		}
 	}
 
@@ -512,62 +551,76 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 		}
 	}
 
-	switch msg.MediaType {
-	case "image":
-		mc := buildImageBubble(msg)
-		parts = append(parts, mc)
-		if w := mc.MinSize().Width; w > naturalContentWidth {
+	if msg.Deleted {
+		placeholder := canvas.NewText("🚫 This message was deleted", emptyHintColor)
+		placeholder.TextStyle.Italic = true
+		placeholder.TextSize = 14
+		parts = append(parts, placeholder)
+		if w := placeholder.MinSize().Width; w > naturalContentWidth {
 			naturalContentWidth = w
 		}
-	case "video":
-		mc := buildVideoBubble(msg)
-		parts = append(parts, mc)
-		if w := mc.MinSize().Width; w > naturalContentWidth {
-			naturalContentWidth = w
-		}
-	case "audio", "voice":
-		mc := buildAudioBubble(msg)
-		parts = append(parts, mc)
-		if w := mc.MinSize().Width; w > naturalContentWidth {
-			naturalContentWidth = w
-		}
-	case "document":
-		mc := buildDocBubble(msg)
-		parts = append(parts, mc)
-		if w := mc.MinSize().Width; w > naturalContentWidth {
-			naturalContentWidth = w
-		}
-	case "sticker":
-		mc := buildStickerBubble(msg)
-		parts = append(parts, mc)
-		if w := mc.MinSize().Width; w > naturalContentWidth {
-			naturalContentWidth = w
-		}
-	default:
-		// Plain text. Probe natural width without wrap so we can size the
-		// bubble to the text and only wrap when it would exceed maxBubbleWidth.
-		if msg.Text != "" {
-			probe := widget.NewLabel(msg.Text)
-			textNatural := probe.MinSize().Width
-			msgLabel := widget.NewLabel(msg.Text)
-			if textNatural+bubblePadding > maxBubbleWidth {
-				msgLabel.Wrapping = fyne.TextWrapWord
+	} else {
+		switch msg.MediaType {
+		case "image":
+			mc := buildImageBubble(msg)
+			parts = append(parts, mc)
+			if w := mc.MinSize().Width; w > naturalContentWidth {
+				naturalContentWidth = w
 			}
-			parts = append(parts, msgLabel)
-			if textNatural > naturalContentWidth {
-				naturalContentWidth = textNatural
+		case "video":
+			mc := buildVideoBubble(msg)
+			parts = append(parts, mc)
+			if w := mc.MinSize().Width; w > naturalContentWidth {
+				naturalContentWidth = w
+			}
+		case "audio", "voice":
+			mc := buildAudioBubble(msg)
+			parts = append(parts, mc)
+			if w := mc.MinSize().Width; w > naturalContentWidth {
+				naturalContentWidth = w
+			}
+		case "document":
+			mc := buildDocBubble(msg)
+			parts = append(parts, mc)
+			if w := mc.MinSize().Width; w > naturalContentWidth {
+				naturalContentWidth = w
+			}
+		case "sticker":
+			mc := buildStickerBubble(msg)
+			parts = append(parts, mc)
+			if w := mc.MinSize().Width; w > naturalContentWidth {
+				naturalContentWidth = w
+			}
+		default:
+			// Plain text. Probe natural width without wrap so we can size the
+			// bubble to the text and only wrap when it would exceed maxBubbleWidth.
+			if msg.Text != "" {
+				probe := widget.NewLabel(msg.Text)
+				textNatural := probe.MinSize().Width
+				msgLabel := widget.NewLabel(msg.Text)
+				if textNatural+bubblePadding > maxBubbleWidth {
+					msgLabel.Wrapping = fyne.TextWrapWord
+				}
+				parts = append(parts, msgLabel)
+				if textNatural > naturalContentWidth {
+					naturalContentWidth = textNatural
+				}
+			}
+		}
+
+		if rxn := buildReactionsRow(msg); rxn != nil {
+			parts = append(parts, rxn)
+			if w := rxn.MinSize().Width; w > naturalContentWidth {
+				naturalContentWidth = w
 			}
 		}
 	}
 
-	if rxn := buildReactionsRow(msg); rxn != nil {
-		parts = append(parts, rxn)
-		if w := rxn.MinSize().Width; w > naturalContentWidth {
-			naturalContentWidth = w
-		}
+	timeStr := msg.Timestamp.Format("15:04")
+	if msg.Edited && !msg.Deleted {
+		timeStr = "edited · " + timeStr
 	}
-
-	timeText := canvas.NewText(msg.Timestamp.Format("15:04"), timeColor)
+	timeText := canvas.NewText(timeStr, timeColor)
 	timeText.TextSize = 12
 	timeText.Alignment = fyne.TextAlignTrailing
 	parts = append(parts, timeText)
@@ -1009,6 +1062,9 @@ func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 			ReplyToMediaType  string `json:"reply_to_media_type,omitempty"`
 
 			Reactions []client.SavedReaction `json:"reactions,omitempty"`
+
+			Edited  bool `json:"edited,omitempty"`
+			Deleted bool `json:"deleted,omitempty"`
 		}
 		if err := decoder.Decode(&sm); err != nil {
 			continue
@@ -1061,6 +1117,8 @@ func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 			ReplyToText:       sm.ReplyToText,
 			ReplyToMediaType:  sm.ReplyToMediaType,
 			Reactions:         sm.Reactions,
+			Edited:            sm.Edited,
+			Deleted:           sm.Deleted,
 		})
 	}
 	return msgs
