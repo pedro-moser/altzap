@@ -145,3 +145,138 @@ func mustWriteBytes(t *testing.T, path string, data []byte) {
 		t.Fatal(err)
 	}
 }
+
+func TestMigrateCWDToXDG_FreshInstallNoOp(t *testing.T) {
+	cwd := t.TempDir()
+	data := t.TempDir()
+
+	if err := MigrateCWDToXDG(cwd, data); err != nil {
+		t.Fatalf("MigrateCWDToXDG: %v", err)
+	}
+
+	entries, _ := os.ReadDir(data)
+	if len(entries) != 0 {
+		t.Fatalf("data dir should still be empty, got %d entries", len(entries))
+	}
+}
+
+func TestMigrateCWDToXDG_FullLegacyMoves(t *testing.T) {
+	cwd := t.TempDir()
+	data := t.TempDir()
+
+	// Lay out a v0.1.0-style CWD.
+	mustWrite(t, filepath.Join(cwd, "whatsapp.db"), []byte("session"))
+	mustWrite(t, filepath.Join(cwd, "whatsapp.db-shm"), []byte("shm"))
+	mustWrite(t, filepath.Join(cwd, "whatsapp.db-wal"), []byte("wal"))
+	mustMkdir(t, filepath.Join(cwd, "store"))
+	mustWrite(t, filepath.Join(cwd, "store", "messages.db"), []byte("msgs"))
+	mustMkdir(t, filepath.Join(cwd, "store", ".legacy"))
+	mustWrite(t, filepath.Join(cwd, "store", ".legacy", "msg_old.json"), []byte("legacy"))
+	mustMkdir(t, filepath.Join(cwd, "media", "chat-x"))
+	mustWrite(t, filepath.Join(cwd, "media", "chat-x", "1.jpg"), []byte("img"))
+
+	if err := MigrateCWDToXDG(cwd, data); err != nil {
+		t.Fatalf("MigrateCWDToXDG: %v", err)
+	}
+
+	expectExists(t, filepath.Join(data, "whatsapp.db"))
+	expectExists(t, filepath.Join(data, "whatsapp.db-shm"))
+	expectExists(t, filepath.Join(data, "messages.db"))
+	expectExists(t, filepath.Join(data, ".legacy", "msg_old.json"))
+	expectExists(t, filepath.Join(data, "media", "chat-x", "1.jpg"))
+
+	expectMissing(t, filepath.Join(cwd, "whatsapp.db"))
+	expectMissing(t, filepath.Join(cwd, "store", "messages.db"))
+	expectMissing(t, filepath.Join(cwd, "media"))
+	// store/ should have been removed once drained
+	expectMissing(t, filepath.Join(cwd, "store"))
+}
+
+func TestMigrateCWDToXDG_OrphanMsgJSONLandsAtDataRoot(t *testing.T) {
+	cwd := t.TempDir()
+	data := t.TempDir()
+
+	mustMkdir(t, filepath.Join(cwd, "store"))
+	mustWrite(t, filepath.Join(cwd, "store", "msg_orphan.json"), []byte("orphan"))
+
+	if err := MigrateCWDToXDG(cwd, data); err != nil {
+		t.Fatalf("MigrateCWDToXDG: %v", err)
+	}
+
+	// Orphan should land at dataDir root so MigrateLegacyJSONLs can consume it.
+	expectExists(t, filepath.Join(data, "msg_orphan.json"))
+	expectMissing(t, filepath.Join(cwd, "store", "msg_orphan.json"))
+}
+
+func TestMigrateCWDToXDG_AlreadyMigratedSkips(t *testing.T) {
+	cwd := t.TempDir()
+	data := t.TempDir()
+
+	// dataDir already has whatsapp.db; CWD has a *different* one — must not overwrite.
+	mustWrite(t, filepath.Join(data, "whatsapp.db"), []byte("xdg-version"))
+	mustWrite(t, filepath.Join(cwd, "whatsapp.db"), []byte("cwd-version"))
+
+	if err := MigrateCWDToXDG(cwd, data); err != nil {
+		t.Fatalf("MigrateCWDToXDG: %v", err)
+	}
+
+	got, _ := os.ReadFile(filepath.Join(data, "whatsapp.db"))
+	if string(got) != "xdg-version" {
+		t.Fatalf("XDG file should be untouched, got %q", got)
+	}
+	// CWD file is preserved (skip path), since target existed.
+	if _, err := os.Stat(filepath.Join(cwd, "whatsapp.db")); err != nil {
+		t.Fatalf("CWD copy should be intact when target exists: %v", err)
+	}
+}
+
+func TestMigrateCWDToXDG_PartialLegacy(t *testing.T) {
+	cwd := t.TempDir()
+	data := t.TempDir()
+
+	// Only ./media exists.
+	mustMkdir(t, filepath.Join(cwd, "media"))
+	mustWrite(t, filepath.Join(cwd, "media", "x.bin"), []byte("y"))
+
+	if err := MigrateCWDToXDG(cwd, data); err != nil {
+		t.Fatalf("MigrateCWDToXDG: %v", err)
+	}
+
+	expectExists(t, filepath.Join(data, "media", "x.bin"))
+	expectMissing(t, filepath.Join(cwd, "media"))
+	// No whatsapp.db in either location — and that's fine.
+	expectMissing(t, filepath.Join(data, "whatsapp.db"))
+}
+
+// --- helpers ---
+
+func mustWrite(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustMkdir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func expectExists(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected %s to exist: %v", path, err)
+	}
+}
+
+func expectMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected %s to be missing, stat err=%v", path, err)
+	}
+}
