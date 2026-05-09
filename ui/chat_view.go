@@ -76,8 +76,7 @@ type ChatView struct {
 	window          fyne.Window
 	searchEntry     *widget.Entry
 	chatList        *widget.List
-	messageBox      *fyne.Container // VBox of bubbles
-	messageScroll   *container.Scroll
+	messageList     *widget.List // virtualized: only visible bubbles materialized
 	messageInput    *widget.Entry
 	attachBtn       *widget.Button
 	micBtn          *widget.Button
@@ -105,6 +104,19 @@ type ChatView struct {
 	avatarFetched map[string]bool // chat_jid -> we've kicked off a fetch
 	muAvatars     sync.Mutex
 
+	// Per-message bubble height cache. widget.List's SetItemHeight triggers
+	// RefreshItem (and so UpdateItem again) only when the value changes; a
+	// stable cache means the second pass is a cheap no-op.
+	bubbleHeights   map[string]float32
+	muBubbleHeights sync.Mutex
+
+	// Diagnostic counters for refreshMessages — number of UpdateItem
+	// invocations and total wall time spent inside bubble construction
+	// during a single refresh window.
+	updateCalls    int
+	updateBubbleNS int64
+	muUpdateStats  sync.Mutex
+
 	// Render-time limit for the open chat: 0 means default. Reset on chat
 	// switch; "Load older" bumps by renderChunk.
 	renderLimit int
@@ -122,6 +134,18 @@ func logIfSlow(op string, t0 time.Time, threshold time.Duration) {
 	if d := time.Since(t0); d >= threshold {
 		log.Printf("slow %s: %s", op, d)
 	}
+}
+
+// msgTypeOf returns the MediaType field, falling back to "text" for plain
+// text. Used only for diagnostic logs.
+func msgTypeOf(m *Message) string {
+	if m == nil {
+		return "<nil>"
+	}
+	if m.MediaType != "" {
+		return m.MediaType
+	}
+	return "text"
 }
 
 // bubbleAlignLayout places a single bubble child with a pre-decided width,
@@ -190,6 +214,7 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		messages:      make(map[string][]*Message),
 		unread:        make(map[string]int),
 		avatarFetched: make(map[string]bool),
+		bubbleHeights: make(map[string]float32),
 	}
 
 	cv.waClient.FetchContacts()
@@ -207,7 +232,7 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		}
 		cv.muMessages.Unlock()
 
-		if chatJID == cv.currentChatJID && cv.messageBox != nil {
+		if chatJID == cv.currentChatJID && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
@@ -223,7 +248,7 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		}
 		cv.muMessages.Unlock()
 
-		if upd.ChatJID == cv.currentChatJID && cv.messageBox != nil {
+		if upd.ChatJID == cv.currentChatJID && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
@@ -240,7 +265,7 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		}
 		cv.muMessages.Unlock()
 
-		if upd.ChatJID == cv.currentChatJID && cv.messageBox != nil {
+		if upd.ChatJID == cv.currentChatJID && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
@@ -256,7 +281,7 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		}
 		cv.muMessages.Unlock()
 
-		if upd.ChatJID == cv.currentChatJID && cv.messageBox != nil {
+		if upd.ChatJID == cv.currentChatJID && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
@@ -272,7 +297,7 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		}
 		cv.muMessages.Unlock()
 
-		if upd.ChatJID == cv.currentChatJID && cv.messageBox != nil {
+		if upd.ChatJID == cv.currentChatJID && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
@@ -568,14 +593,131 @@ func (cv *ChatView) buildChatList() *widget.List {
 }
 
 func (cv *ChatView) buildMessageArea() fyne.CanvasObject {
-	cv.messageBox = container.NewVBox()
-	topSpacer := canvas.NewRectangle(color.RGBA{A: 0})
-	topSpacer.SetMinSize(fyne.NewSize(1, 8))
-	bottomSpacer := canvas.NewRectangle(color.RGBA{A: 0})
-	bottomSpacer.SetMinSize(fyne.NewSize(1, 8))
-	padded := container.NewVBox(topSpacer, cv.messageBox, bottomSpacer)
-	cv.messageScroll = container.NewVScroll(padded)
-	return cv.messageScroll
+	cv.messageList = widget.NewList(
+		cv.messageListLength,
+		cv.messageListCreate,
+		cv.messageListUpdate,
+	)
+	cv.messageList.HideSeparators = true
+	return cv.messageList
+}
+
+// messageWindowStart is the offset in cv.messages[currentChatJID] of the
+// first message currently inside the render window. Anything before that is
+// hidden behind the "Load older" affordance.
+func (cv *ChatView) messageWindowStart(msgs []*Message) int {
+	limit := cv.renderLimit
+	if limit <= 0 {
+		limit = initialRenderLimit
+	}
+	if len(msgs) > limit {
+		return len(msgs) - limit
+	}
+	return 0
+}
+
+// messageListLength returns one row per visible message plus a leading
+// "Load older" row when there are messages outside the window.
+func (cv *ChatView) messageListLength() int {
+	cv.muMessages.RLock()
+	defer cv.muMessages.RUnlock()
+	msgs := cv.messages[cv.currentChatJID]
+	if len(msgs) == 0 {
+		return 0
+	}
+	start := cv.messageWindowStart(msgs)
+	rows := len(msgs) - start
+	if start > 0 {
+		rows++
+	}
+	return rows
+}
+
+// messageListCreate returns a recyclable wrapper. UpdateItem swaps in the
+// real bubble; SetItemHeight sets per-row height once we know it.
+//
+// The placeholder MinSize is critical: widget.List computes the visible-row
+// window from itemMin (the template's MinSize) BEFORE per-id heights kick
+// in, so a zero-MinSize template makes Fyne think every row fits the
+// viewport and call UpdateItem for all N rows on every Refresh. With a
+// realistic placeholder, only ~10 visible rows materialize.
+func (cv *ChatView) messageListCreate() fyne.CanvasObject {
+	placeholder := canvas.NewRectangle(color.RGBA{A: 0})
+	placeholder.SetMinSize(fyne.NewSize(1, 50))
+	return container.NewStack(placeholder)
+}
+
+// messageListUpdate is invoked by widget.List when a row enters the
+// viewport. We rebuild bubbles fresh — recycling complex bubble layouts
+// (varying types, reactions, replies) is more fragile than rebuilding for
+// the small set of visible rows. SetItemHeight is gated by a per-message
+// height cache to dodge widget.List's recursive RefreshItem (each
+// SetItemHeight with a new value calls UpdateItem again, which would
+// otherwise double the bubble-build cost per visible cell).
+func (cv *ChatView) messageListUpdate(id widget.ListItemID, item fyne.CanvasObject) {
+	stack, ok := item.(*fyne.Container)
+	if !ok {
+		return
+	}
+
+	cv.muMessages.RLock()
+	msgs := cv.messages[cv.currentChatJID]
+	start := cv.messageWindowStart(msgs)
+	hasOlder := start > 0
+
+	var content fyne.CanvasObject
+	var cacheKey string
+	if hasOlder && id == 0 {
+		cv.muMessages.RUnlock()
+		chunk := renderChunk
+		if chunk > start {
+			chunk = start
+		}
+		olderBtn := widget.NewButton(
+			fmt.Sprintf("Load %d older messages", chunk),
+			cv.loadOlderMessages,
+		)
+		olderBtn.Importance = widget.LowImportance
+		content = container.NewCenter(olderBtn)
+	} else {
+		msgIdx := id
+		if hasOlder {
+			msgIdx = id - 1
+		}
+		actual := start + msgIdx
+		if actual < 0 || actual >= len(msgs) {
+			cv.muMessages.RUnlock()
+			return
+		}
+		msg := msgs[actual]
+		cv.muMessages.RUnlock()
+		cacheKey = msg.ID
+		bt0 := time.Now()
+		content = cv.buildMessageBubble(msg)
+		bd := time.Since(bt0)
+		cv.muUpdateStats.Lock()
+		cv.updateBubbleNS += bd.Nanoseconds()
+		cv.updateCalls++
+		cv.muUpdateStats.Unlock()
+		if bd >= 50*time.Millisecond {
+			log.Printf("slow buildBubble id=%d type=%s text-len=%d: %s",
+				id, msgTypeOf(msg), len(msg.Text), bd)
+		}
+	}
+	stack.Objects = []fyne.CanvasObject{content}
+	stack.Refresh()
+	if cv.messageList != nil {
+		h := content.MinSize().Height
+		if cacheKey != "" {
+			cv.muBubbleHeights.Lock()
+			cached, hit := cv.bubbleHeights[cacheKey]
+			if !hit || cached != h {
+				cv.bubbleHeights[cacheKey] = h
+			}
+			cv.muBubbleHeights.Unlock()
+		}
+		cv.messageList.SetItemHeight(id, h)
+	}
 }
 
 func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
@@ -709,65 +851,52 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 	return container.New(bubbleAlignLayout{rightAlign: msg.IsOwn, fixedWidth: bubbleW}, bubble)
 }
 
+// refreshMessages rebuilds the visible window and scrolls to the latest
+// message. Cheap with widget.List: only the visible bubbles get
+// re-materialized via UpdateItem — Length changing triggers re-layout.
 func (cv *ChatView) refreshMessages() {
-	cv.rebuildVisibleBubbles(true /* scrollToBottom */)
-}
-
-// rebuildVisibleBubbles materializes only the trailing window of cached
-// messages (capped by cv.renderLimit, default initialRenderLimit). When
-// there are more messages beyond the window, prepends a "Load older
-// messages" affordance so the user can pull more on demand.
-func (cv *ChatView) rebuildVisibleBubbles(scrollToBottom bool) {
 	t0 := time.Now()
-	defer func() { logIfSlow("rebuildVisibleBubbles", t0, 50*time.Millisecond) }()
-	cv.muMessages.RLock()
-	msgs := cv.messages[cv.currentChatJID]
-
-	limit := cv.renderLimit
-	if limit <= 0 {
-		limit = initialRenderLimit
+	cv.muUpdateStats.Lock()
+	cv.updateCalls = 0
+	cv.updateBubbleNS = 0
+	cv.muUpdateStats.Unlock()
+	defer func() {
+		d := time.Since(t0)
+		if d >= 50*time.Millisecond {
+			cv.muUpdateStats.Lock()
+			calls := cv.updateCalls
+			bubbleNS := cv.updateBubbleNS
+			cv.muUpdateStats.Unlock()
+			log.Printf("slow refreshMessages: %s (UpdateItem×%d, in-bubble %s)",
+				d, calls, time.Duration(bubbleNS))
+		}
+	}()
+	if cv.messageList == nil {
+		return
 	}
-	start := 0
-	if len(msgs) > limit {
-		start = len(msgs) - limit
-	}
-
-	items := make([]fyne.CanvasObject, 0, len(msgs)-start+1)
-	if start > 0 {
-		olderBtn := widget.NewButton(
-			fmt.Sprintf("Load %d older messages", min(renderChunk, start)),
-			cv.loadOlderMessages,
-		)
-		olderBtn.Importance = widget.LowImportance
-		items = append(items, container.NewCenter(olderBtn))
-	}
-	for _, m := range msgs[start:] {
-		items = append(items, cv.buildMessageBubble(m))
-	}
-	cv.muMessages.RUnlock()
-
-	cv.messageBox.Objects = items
-	cv.messageBox.Refresh()
-	if scrollToBottom {
-		cv.messageScroll.ScrollToBottom()
-	}
+	cv.messageList.Refresh()
+	cv.messageList.ScrollToBottom()
 }
 
-// loadOlderMessages expands the render window by renderChunk and rebuilds
-// without scrolling — keeps the user's current view stable while older
-// content is now revealed above.
+// loadOlderMessages expands the render window by renderChunk without
+// scrolling — keeps the user's current view stable as older content
+// reveals above.
 func (cv *ChatView) loadOlderMessages() {
 	if cv.renderLimit <= 0 {
 		cv.renderLimit = initialRenderLimit
 	}
 	cv.renderLimit += renderChunk
-	cv.rebuildVisibleBubbles(false)
+	if cv.messageList != nil {
+		cv.messageList.Refresh()
+	}
 }
 
-func (cv *ChatView) appendMessageBubble(msg *Message) {
-	cv.messageBox.Objects = append(cv.messageBox.Objects, cv.buildMessageBubble(msg))
-	cv.messageBox.Refresh()
-	cv.messageScroll.ScrollToBottom()
+func (cv *ChatView) appendMessageBubble(_ *Message) {
+	if cv.messageList == nil {
+		return
+	}
+	cv.messageList.Refresh()
+	cv.messageList.ScrollToBottom()
 }
 
 func (cv *ChatView) onSearch(text string) {
@@ -1106,7 +1235,7 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 		if cv.chatSubtitle != nil {
 			cv.chatSubtitle.SetText(subtitle)
 		}
-		if cv.messageBox != nil {
+		if cv.messageList != nil {
 			cv.refreshMessages()
 		}
 		if cv.chatList != nil {
@@ -1228,7 +1357,7 @@ func (cv *ChatView) ReloadFromDisk() {
 		if cv.chatList != nil {
 			cv.chatList.Refresh()
 		}
-		if cv.currentChatJID != "" && cv.messageBox != nil {
+		if cv.currentChatJID != "" && cv.messageList != nil {
 			cv.muMessages.Lock()
 			cv.messages[cv.currentChatJID] = cv.loadMessagesFromDisk(cv.currentChatJID)
 			cv.muMessages.Unlock()
@@ -1299,7 +1428,7 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	}
 
 	fyne.Do(func() {
-		if jidStr == cv.currentChatJID && cv.messageBox != nil {
+		if jidStr == cv.currentChatJID && cv.messageList != nil {
 			cv.appendMessageBubble(newMsg)
 		}
 	})
