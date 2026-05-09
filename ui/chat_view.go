@@ -111,9 +111,18 @@ type ChatView struct {
 }
 
 const (
-	initialRenderLimit = 300
-	renderChunk        = 200
+	initialRenderLimit = 60
+	renderChunk        = 80
 )
+
+// logIfSlow prints op + elapsed only when above threshold. Lets us keep a
+// permanent low-volume breadcrumb trail for chat-open hot path without
+// spamming logs in the common (fast) case.
+func logIfSlow(op string, t0 time.Time, threshold time.Duration) {
+	if d := time.Since(t0); d >= threshold {
+		log.Printf("slow %s: %s", op, d)
+	}
+}
 
 // bubbleAlignLayout places a single bubble child with a pre-decided width,
 // either left- or right-aligned within the row.
@@ -709,6 +718,8 @@ func (cv *ChatView) refreshMessages() {
 // there are more messages beyond the window, prepends a "Load older
 // messages" affordance so the user can pull more on demand.
 func (cv *ChatView) rebuildVisibleBubbles(scrollToBottom bool) {
+	t0 := time.Now()
+	defer func() { logIfSlow("rebuildVisibleBubbles", t0, 50*time.Millisecond) }()
 	cv.muMessages.RLock()
 	msgs := cv.messages[cv.currentChatJID]
 
@@ -1047,6 +1058,9 @@ func (cv *ChatView) onNewChat() {
 }
 
 func (cv *ChatView) selectChatJID(jidStr string) {
+	t0 := time.Now()
+	defer logIfSlow("selectChatJID "+jidStr, t0, 100*time.Millisecond)
+
 	parsed, err := types.ParseJID(jidStr)
 	if err != nil {
 		dialog.ShowError(fmt.Errorf("invalid JID %q: %v", jidStr, err), cv.window)
@@ -1102,6 +1116,8 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 }
 
 func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
+	t0 := time.Now()
+	defer func() { logIfSlow("loadMessagesFromDisk "+jid, t0, 50*time.Millisecond) }()
 	recs, err := cv.waClient.LoadMessages(jid)
 	if err != nil {
 		return []*Message{}
