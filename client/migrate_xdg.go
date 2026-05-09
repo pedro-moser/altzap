@@ -55,6 +55,9 @@ func crossDeviceCopy(src, dst string) error {
 	}
 
 	written, err := io.Copy(out, in)
+	if syncErr := out.Sync(); err == nil {
+		err = syncErr
+	}
 	if cerr := out.Close(); err == nil {
 		err = cerr
 	}

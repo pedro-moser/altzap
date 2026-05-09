@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -65,8 +66,8 @@ func TestMoveOrCopy_SourceMissingReturnsErrNotExist(t *testing.T) {
 	}
 }
 
-// crossDeviceCopyFile is exported via test-only build edge: we exercise
-// the file-copy path directly because simulating EXDEV is fragile.
+// We exercise crossDeviceCopy directly here (instead of forcing EXDEV)
+// because simulating cross-device errors is fragile to set up.
 func TestCrossDeviceCopy_FilePreservesContent(t *testing.T) {
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "src.bin")
@@ -87,8 +88,8 @@ func TestCrossDeviceCopy_FilePreservesContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dst missing: %v", err)
 	}
-	if len(got) != len(want) {
-		t.Fatalf("size mismatch: got %d, want %d", len(got), len(want))
+	if !bytes.Equal(got, want) {
+		t.Fatalf("payload mismatch: got len=%d, want len=%d", len(got), len(want))
 	}
 	if _, err := os.Stat(src); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("src should be gone, stat err=%v", err)
@@ -99,5 +100,48 @@ func TestCrossDeviceCopy_FilePreservesContent(t *testing.T) {
 func TestEXDEV_IsCrossDeviceLinkErrno(t *testing.T) {
 	if syscall.EXDEV == 0 {
 		t.Skip("EXDEV not defined on this platform")
+	}
+}
+
+func TestCrossDeviceCopyDir_RecursiveTree(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "tree")
+	dst := filepath.Join(tmp, "moved-tree")
+
+	// src/a.txt, src/sub/b.bin, src/sub/deep/c.png
+	mustWriteBytes(t, filepath.Join(src, "a.txt"), []byte("alpha"))
+	mustWriteBytes(t, filepath.Join(src, "sub", "b.bin"), []byte("beta-bytes"))
+	mustWriteBytes(t, filepath.Join(src, "sub", "deep", "c.png"), []byte("gamma-pixels"))
+
+	if err := crossDeviceCopyDir(src, dst); err != nil {
+		t.Fatalf("crossDeviceCopyDir: %v", err)
+	}
+
+	for path, want := range map[string]string{
+		filepath.Join(dst, "a.txt"):                "alpha",
+		filepath.Join(dst, "sub", "b.bin"):         "beta-bytes",
+		filepath.Join(dst, "sub", "deep", "c.png"): "gamma-pixels",
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if string(got) != want {
+			t.Fatalf("%s: got %q, want %q", path, got, want)
+		}
+	}
+
+	if _, err := os.Stat(src); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("src tree should be removed after copy, stat err=%v", err)
+	}
+}
+
+func mustWriteBytes(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
