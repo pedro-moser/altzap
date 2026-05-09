@@ -32,3 +32,6 @@ Thumbs.db
 
 # Go
 vendor/
+
+# Superpowers brainstorm session (visual companion mockups)
+.superpowers/

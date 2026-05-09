@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -51,12 +52,17 @@ func playAudio(msgID, path string, onState func(playing bool)) error {
 	stopAudio() // tear down any previous playback
 
 	cmd := exec.Command("ffplay",
-		"-nodisp",     // no video window
-		"-autoexit",   // exit when audio ends
+		"-nodisp",   // no video window
+		"-autoexit", // exit when audio ends
 		"-loglevel", "error",
 		path,
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Route to the user-chosen output sink, if any. ffplay reads PULSE_SINK
+	// from the environment when using the default Pulse/PipeWire backend.
+	if sink := AudioOutputDevice(); sink != "" {
+		cmd.Env = append(os.Environ(), "PULSE_SINK="+sink)
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}

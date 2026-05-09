@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/storage"
@@ -50,7 +52,7 @@ func (r *recorder) start() (string, error) {
 	cmd := exec.Command(
 		"ffmpeg",
 		"-hide_banner", "-loglevel", "error", "-y",
-		"-f", "pulse", "-i", "default",
+		"-f", "pulse", "-i", AudioInputDevice(),
 		"-c:a", "libopus", "-b:a", "32k",
 		tmpFile,
 	)
@@ -173,33 +175,12 @@ func (cv *ChatView) pickAndSend(kind attachKind) {
 			return
 		}
 
-		go func() {
-			var (
-				msgID   string
-				sendErr error
-			)
-			switch kind {
-			case attachImage:
-				msgID, sendErr = cv.waClient.SendImage(jid, path, "")
-			case attachAudio:
-				msgID, sendErr = cv.waClient.SendAudio(jid, path)
-			case attachDocument:
-				msgID, sendErr = cv.waClient.SendFile(jid, path, filepath.Base(path))
-			}
-			if sendErr != nil {
-				fyne.Do(func() { dialog.ShowError(sendErr, cv.window) })
-				return
-			}
-			fyne.Do(func() {
-				cv.appendMessageBubble(&Message{
-					ID:        msgID,
-					Sender:    "You",
-					Text:      "[" + attachLabel(kind) + ": " + filepath.Base(path) + "]",
-					Timestamp: time.Now(),
-					IsOwn:     true,
-				})
-			})
-		}()
+		switch kind {
+		case attachImage:
+			cv.confirmAndSendImage(jid, path)
+		default:
+			cv.sendAttachment(jid, path, kind, "")
+		}
 	}, cv.window)
 
 	switch kind {
@@ -210,6 +191,76 @@ func (cv *ChatView) pickAndSend(kind attachKind) {
 	}
 	picker.Resize(fyne.NewSize(700, 500))
 	picker.Show()
+}
+
+// confirmAndSendImage shows a preview-plus-caption dialog before actually
+// firing the upload. Lets the user back out after picking the wrong file
+// and adds a caption — WhatsApp's standard image-share flow.
+func (cv *ChatView) confirmAndSendImage(jid types.JID, path string) {
+	img := canvas.NewImageFromFile(path)
+	img.FillMode = canvas.ImageFillContain
+	img.SetMinSize(fyne.NewSize(420, 320))
+
+	caption := widget.NewEntry()
+	caption.PlaceHolder = "Add a caption (optional)…"
+
+	nameLbl := widget.NewLabel(filepath.Base(path))
+	nameLbl.Truncation = fyne.TextTruncateEllipsis
+	nameLbl.Importance = widget.LowImportance
+
+	bottom := container.NewVBox(nameLbl, caption)
+	content := container.NewBorder(nil, bottom, nil, nil, img)
+
+	d := dialog.NewCustomConfirm(
+		"Send image", "Send", "Cancel",
+		container.NewPadded(content),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			cv.sendAttachment(jid, path, attachImage, strings.TrimSpace(caption.Text))
+		},
+		cv.window,
+	)
+	d.Resize(fyne.NewSize(560, 540))
+	d.Show()
+	cv.window.Canvas().Focus(caption)
+}
+
+// sendAttachment dispatches the actual upload + appends a local optimistic
+// bubble. Caption is only honored for image; audio/document ignore it.
+func (cv *ChatView) sendAttachment(jid types.JID, path string, kind attachKind, caption string) {
+	go func() {
+		var (
+			msgID   string
+			sendErr error
+		)
+		switch kind {
+		case attachImage:
+			msgID, sendErr = cv.waClient.SendImage(jid, path, caption)
+		case attachAudio:
+			msgID, sendErr = cv.waClient.SendAudio(jid, path)
+		case attachDocument:
+			msgID, sendErr = cv.waClient.SendFile(jid, path, filepath.Base(path))
+		}
+		if sendErr != nil {
+			fyne.Do(func() { dialog.ShowError(sendErr, cv.window) })
+			return
+		}
+		text := caption
+		if text == "" {
+			text = "[" + attachLabel(kind) + ": " + filepath.Base(path) + "]"
+		}
+		fyne.Do(func() {
+			cv.appendMessageBubble(&Message{
+				ID:        msgID,
+				Sender:    "You",
+				Text:      text,
+				Timestamp: time.Now(),
+				IsOwn:     true,
+			})
+		})
+	}()
 }
 
 func attachLabel(kind attachKind) string {
@@ -332,17 +383,43 @@ func (cv *ChatView) StopRecordingIfActive() {
 	}
 }
 
-// inputBarBuild assembles the [attach] [entry] [mic] [send] row used as the
-// chat input area. Kept here so the chat_view file stays focused on layout.
+// inputBarBuild assembles the chat input area: a (hidden by default) reply
+// preview row stacked above the [attach] [entry] [mic] [send] row. Kept
+// here so chat_view.go stays focused on layout.
 func (cv *ChatView) inputBarBuild() fyne.CanvasObject {
 	cv.messageInput = widget.NewEntry()
 	cv.messageInput.PlaceHolder = "Type a message"
 	cv.messageInput.OnSubmitted = func(string) { cv.sendMessage() }
 
+	// Reply preview: filled by beginReply, cleared by cancelReply. Vertical
+	// accent bar (color = sender's avatar tint) on the left, sender + text
+	// in the middle, X to cancel on the right. Hidden until beginReply.
+	cv.replyPreviewAccent = canvas.NewRectangle(ctpMauve)
+	cv.replyPreviewAccent.SetMinSize(fyne.NewSize(3, 0))
+
+	cv.replyPreviewSenderLbl = widget.NewLabel("")
+	cv.replyPreviewSenderLbl.TextStyle.Bold = true
+
+	cv.replyPreviewTextLbl = widget.NewLabel("")
+	cv.replyPreviewTextLbl.Truncation = fyne.TextTruncateEllipsis
+	cv.replyPreviewTextLbl.Importance = widget.LowImportance
+
+	closeReplyBtn := widget.NewButtonWithIcon("", theme.CancelIcon(), cv.cancelReply)
+	closeReplyBtn.Importance = widget.LowImportance
+
+	replyTextArea := container.NewVBox(cv.replyPreviewSenderLbl, cv.replyPreviewTextLbl)
+	replyInner := container.NewBorder(nil, nil, cv.replyPreviewAccent, closeReplyBtn, replyTextArea)
+	cv.replyPreview = container.NewPadded(replyInner)
+	cv.replyPreview.Hide()
+
 	cv.attachBtn = widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
 		cv.showAttachMenu(cv.attachBtn)
 	})
 	cv.attachBtn.Importance = widget.MediumImportance
+
+	emojiBtn := widget.NewButton("😀", nil)
+	emojiBtn.Importance = widget.LowImportance
+	emojiBtn.OnTapped = func() { cv.showEmojiPicker(emojiBtn) }
 
 	cv.micBtn = widget.NewButtonWithIcon("", theme.MediaRecordIcon(), cv.onMicClicked)
 	cv.micBtn.Importance = widget.MediumImportance
@@ -353,6 +430,9 @@ func (cv *ChatView) inputBarBuild() fyne.CanvasObject {
 	sendBtn := widget.NewButtonWithIcon("", theme.MailSendIcon(), cv.sendMessage)
 	sendBtn.Importance = widget.HighImportance
 
+	leftBtns := container.NewHBox(cv.attachBtn, emojiBtn)
 	rightBtns := container.NewHBox(cv.micBtn, sendBtn)
-	return container.NewBorder(nil, nil, cv.attachBtn, rightBtns, cv.messageInput)
+	inputRow := container.NewBorder(nil, nil, leftBtns, rightBtns, cv.messageInput)
+
+	return container.NewVBox(cv.replyPreview, inputRow)
 }

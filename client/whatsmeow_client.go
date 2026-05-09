@@ -154,26 +154,26 @@ type Chat struct {
 
 // WhatsAppClient wraps the whatsmeow client with higher-level operations
 type WhatsAppClient struct {
-	client            *whatsmeow.Client
-	store             *sqlstore.Container
-	msgStore          *MessageStore
-	OnMessage         func(MessageEvent)
-	OnLogin           LoginCallback
-	OnHistoryUpdate   func()
-	OnMediaReady      func(chatJID, msgID, mediaPath string) // fires when an async download finishes
-	OnReactionUpdate  func(ReactionUpdate)                   // fires when a reaction is added/removed
-	OnMessageEdit     func(MessageEdit)                      // fires when a message's text was edited
-	OnMessageDelete   func(MessageDelete)                    // fires on "delete for everyone"
-	OnMessageStatus   func(MessageStatus)                    // fires when delivered/read receipt arrives
-	muChannels        sync.RWMutex
-	ContactCache      map[string]Contact
-	muContacts        sync.RWMutex
-	muMessages        sync.Mutex
-	messages          map[string][]MessageEvent
-	chatRegistry      map[string]string // jid -> display name
-	muChats           sync.RWMutex
-	groupCache        map[string]string // jid -> group name
-	muGroups          sync.RWMutex
+	client           *whatsmeow.Client
+	store            *sqlstore.Container
+	msgStore         *MessageStore
+	OnMessage        func(MessageEvent)
+	OnLogin          LoginCallback
+	OnHistoryUpdate  func()
+	OnMediaReady     func(chatJID, msgID, mediaPath string) // fires when an async download finishes
+	OnReactionUpdate func(ReactionUpdate)                   // fires when a reaction is added/removed
+	OnMessageEdit    func(MessageEdit)                      // fires when a message's text was edited
+	OnMessageDelete  func(MessageDelete)                    // fires on "delete for everyone"
+	OnMessageStatus  func(MessageStatus)                    // fires when delivered/read receipt arrives
+	muChannels       sync.RWMutex
+	ContactCache     map[string]Contact
+	muContacts       sync.RWMutex
+	muMessages       sync.Mutex
+	messages         map[string][]MessageEvent
+	chatRegistry     map[string]string // jid -> display name
+	muChats          sync.RWMutex
+	groupCache       map[string]string // jid -> group name
+	muGroups         sync.RWMutex
 }
 
 // NewWhatsAppClient creates a new WhatsApp client instance.
@@ -279,7 +279,6 @@ func (w *WhatsAppClient) WaitUntilLoggedIn() bool {
 	}
 	return false
 }
-
 
 // extractContext returns the ContextInfo of whichever message variant is set.
 // ContextInfo carries reply (QuotedMessage), mentions, and forward state.
@@ -847,29 +846,108 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 	}
 }
 
-// SendMessage sends a text message to a chat. On success it persists the
-// outgoing record locally so it survives a restart even if whatsmeow's
-// own-device echo never fires. Returns the message ID.
-func (w *WhatsAppClient) SendMessage(jid types.JID, text string) (string, error) {
+// ReplyTo describes the message a new outgoing message is quoting.
+// Used by SendMessage when reply != nil. SenderJID is best-effort —
+// WhatsApp will still render the quote without it for 1-1 chats, but
+// groups expect Participant.
+type ReplyTo struct {
+	MessageID  string
+	SenderJID  string
+	QuotedText string
+}
+
+// GenerateMessageID returns a fresh, valid WhatsApp message ID. Used for
+// optimistic UI sends: the caller stamps the bubble with this ID *before*
+// firing the network call, so the user sees their message land instantly
+// instead of waiting on the round-trip ACK. Empty if not connected.
+func (w *WhatsAppClient) GenerateMessageID() string {
+	if w.client == nil {
+		return ""
+	}
+	return string(w.client.GenerateMessageID())
+}
+
+// SendMessage sends a text message to a chat. If reply is non-nil, it is
+// sent as a reply to the referenced message (waE2E.ExtendedTextMessage
+// with ContextInfo.QuotedMessage). If id is non-empty, the server is
+// asked to use that ID — used by the UI's optimistic-send path so the
+// bubble it added pre-ACK matches the eventual server record. On success
+// it persists the outgoing record locally so it survives a restart even
+// if whatsmeow's own-device echo never fires. Returns the message ID.
+func (w *WhatsAppClient) SendMessage(jid types.JID, text string, reply *ReplyTo, id string) (string, error) {
 	if !w.IsConnected() {
 		return "", fmt.Errorf("not connected to WhatsApp")
 	}
 
-	resp, err := w.client.SendMessage(context.Background(), jid, &waE2E.Message{
-		Conversation: proto.String(text),
-	})
+	var msg *waE2E.Message
+	if reply == nil {
+		msg = &waE2E.Message{Conversation: proto.String(text)}
+	} else {
+		ctx := &waE2E.ContextInfo{
+			StanzaID:      proto.String(reply.MessageID),
+			QuotedMessage: &waE2E.Message{Conversation: proto.String(reply.QuotedText)},
+		}
+		if reply.SenderJID != "" {
+			ctx.Participant = proto.String(reply.SenderJID)
+		}
+		msg = &waE2E.Message{
+			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+				Text:        proto.String(text),
+				ContextInfo: ctx,
+			},
+		}
+	}
+
+	var resp whatsmeow.SendResponse
+	var err error
+	if id != "" {
+		resp, err = w.client.SendMessage(context.Background(), jid, msg,
+			whatsmeow.SendRequestExtra{ID: types.MessageID(id)})
+	} else {
+		resp, err = w.client.SendMessage(context.Background(), jid, msg)
+	}
 	if err != nil {
 		return "", err
 	}
 
-	w.persistOwn(SavedMessage{
+	saved := SavedMessage{
 		ID:        resp.ID,
 		ChatJID:   jid.String(),
 		Text:      text,
 		Timestamp: resp.Timestamp.Unix(),
 		FromMe:    true,
-	})
+	}
+	if reply != nil {
+		saved.ReplyToID = reply.MessageID
+		saved.ReplyToSenderJID = reply.SenderJID
+		saved.ReplyToText = reply.QuotedText
+	}
+	w.persistOwn(saved)
 	return resp.ID, nil
+}
+
+// OwnJID returns the JID of the device this client is logged in as, or the
+// zero JID if not logged in. Used when constructing reply context where the
+// quoted message is one of our own.
+func (w *WhatsAppClient) OwnJID() types.JID {
+	if w.client == nil || w.client.Store == nil || w.client.Store.ID == nil {
+		return types.JID{}
+	}
+	return *w.client.Store.ID
+}
+
+// SendReaction emits an emoji reaction to the referenced message. Empty
+// emoji removes the user's previous reaction. WhatsApp accepts at most one
+// reaction per user per message — sending a different emoji replaces the
+// previous one server-side; the eventual ReactionMessage echo is what
+// updates our in-memory Message.Reactions via OnReactionUpdate.
+func (w *WhatsAppClient) SendReaction(chat, sender types.JID, msgID, emoji string) error {
+	if !w.IsConnected() {
+		return fmt.Errorf("not connected to WhatsApp")
+	}
+	msg := w.client.BuildReaction(chat, sender, types.MessageID(msgID), emoji)
+	_, err := w.client.SendMessage(context.Background(), chat, msg)
+	return err
 }
 
 // persistOwn writes a freshly-sent record to the chat's JSONL. Tolerates
@@ -1178,6 +1256,33 @@ func (w *WhatsAppClient) LookupName(jid types.JID) string {
 		return jid.User
 	}
 	return jidStr
+}
+
+// PhoneForJID returns the real phone number for a chat JID, or "" if it
+// can't be resolved (group, unknown LID mapping, etc.).
+//
+// WhatsApp now uses two JID flavours: the classic phone-number JID
+// (`<phone>@s.whatsapp.net`) and the privacy-preserving LID
+// (`<opaque>@lid`). Newer accounts and many group conversations use LID
+// for the chat itself, so taking the JID's User part naively gives a
+// meaningless opaque ID. For LID JIDs we ask whatsmeow's LID store for
+// the mapped phone-number JID; the mapping is populated over time
+// (history sync, contact lookups), so it can legitimately come back empty.
+func (w *WhatsAppClient) PhoneForJID(jid types.JID) string {
+	switch jid.Server {
+	case types.DefaultUserServer, types.LegacyUserServer, types.HostedServer:
+		return jid.User
+	case types.HiddenUserServer:
+		if w.client == nil || w.client.Store == nil || w.client.Store.LIDs == nil {
+			return ""
+		}
+		pn, err := w.client.Store.LIDs.GetPNForLID(context.Background(), jid)
+		if err != nil || pn.IsEmpty() {
+			return ""
+		}
+		return pn.User
+	}
+	return ""
 }
 
 // FetchGroups loads all joined groups from the WhatsApp servers into the cache.

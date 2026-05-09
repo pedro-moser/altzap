@@ -12,16 +12,16 @@ import "image/color"
 // type avoids type assertions at every site.
 type Palette struct {
 	// Accents
-	Rosewater, Flamingo, Pink, Mauve, Red, Maroon          color.RGBA
+	Rosewater, Flamingo, Pink, Mauve, Red, Maroon             color.RGBA
 	Peach, Yellow, Green, Teal, Sky, Sapphire, Blue, Lavender color.RGBA
 
 	// Foreground / overlays (light → dark)
-	Text, Subtext1, Subtext0                color.RGBA
-	Overlay2, Overlay1, Overlay0            color.RGBA
+	Text, Subtext1, Subtext0     color.RGBA
+	Overlay2, Overlay1, Overlay0 color.RGBA
 
 	// Background / surfaces (dark → darker for dark themes; reverse for light)
-	Surface2, Surface1, Surface0            color.RGBA
-	Base, Mantle, Crust                     color.RGBA
+	Surface2, Surface1, Surface0 color.RGBA
+	Base, Mantle, Crust          color.RGBA
 }
 
 // Hex utility — `0xRRGGBB` literal → opaque color.RGBA.

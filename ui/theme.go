@@ -83,6 +83,7 @@ func ApplyPalette(p Palette) Palette {
 	ctpBase = p.Base
 	ctpMantle = p.Mantle
 	ctpCrust = p.Crust
+	applySemanticColors()
 	return p
 }
 
@@ -127,11 +128,23 @@ func (paletteTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.C
 	case theme.ColorNameWarning:
 		return ctpYellow
 	case theme.ColorNameFocus:
+		// Keyboard-focus ring on inputs/buttons — kept for accessibility.
 		return color.RGBA{R: ctpMauve.R, G: ctpMauve.G, B: ctpMauve.B, A: 0x80}
 	case theme.ColorNameSelection:
-		return color.RGBA{R: ctpMauve.R, G: ctpMauve.G, B: ctpMauve.B, A: 0x60}
+		// Fyne paints this on top of every list row's selection AND text-entry
+		// selections. The chat list owns its own selection visual via
+		// `selectionTint` (see chat_view.go), so a second mauve overlay just
+		// doubles up and looks muddy. Transparent here means Fyne adds no
+		// overlay; chat list shows our solid tint, message-list rows have no
+		// "selected" highlight at all (intended — messages aren't selectable).
+		// Text-entry selection loses its highlight too — minor regression
+		// accepted for a cleaner list look.
+		return color.RGBA{A: 0}
 	case theme.ColorNameHover:
-		return color.RGBA{R: ctpSurface2.R, G: ctpSurface2.G, B: ctpSurface2.B, A: 0x80}
+		// Hover overlay applied on every list row + button. Looked grungy on
+		// the message bubbles (Surface2 wash over Surface1/Surface2 already)
+		// — transparent kills it everywhere.
+		return color.RGBA{A: 0}
 	case theme.ColorNamePressed:
 		return ctpSurface2
 	case theme.ColorNameHeaderBackground:

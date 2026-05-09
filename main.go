@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"log"
 
+	"altzap/client"
+	"altzap/ui"
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/driver/desktop"
 	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
-	"altzap/client"
-	"altzap/ui"
 )
 
 func main() {
@@ -31,6 +31,11 @@ func main() {
 		KeyName:  fyne.KeyQ,
 		Modifier: fyne.KeyModifierControl,
 	}, func(_ fyne.Shortcut) { fApp.Quit() })
+
+	// ESC dispatch: every dismissible overlay (image/video popup, modal
+	// notice, reply preview, …) pushes a dismiss callback on the stack;
+	// pressing ESC pops + invokes the topmost.
+	ui.InstallEscHandler(window.Canvas())
 
 	logger := waLog.Stdout("Main", "INFO", false)
 	storeContainer, err := sqlstore.New(context.Background(), "sqlite3", "whatsapp.db?_foreign_keys=on", logger)

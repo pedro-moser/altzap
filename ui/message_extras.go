@@ -5,11 +5,12 @@ import (
 	"image/color"
 	"sort"
 
+	"altzap/client"
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"altzap/client"
 )
 
 // buildReplyBox renders a small framed area shown above a bubble's content
@@ -61,47 +62,58 @@ func buildReplyBox(msg *Message) fyne.CanvasObject {
 
 	textCol := container.NewVBox(senderText, previewLbl)
 
-	bgC := color.RGBA{R: 0x31, G: 0x32, B: 0x44, A: 0x40}
-	bg := canvas.NewRectangle(bgC)
+	bg := canvas.NewRectangle(color.RGBA{R: ctpSurface0.R, G: ctpSurface0.G, B: ctpSurface0.B, A: 0x40})
 	bg.CornerRadius = 4
 
 	row := container.NewBorder(nil, nil, leftBar, nil, container.NewPadded(textCol))
 	return container.NewStack(bg, row)
 }
 
-// buildReactionsRow renders a horizontal list of emoji chips with counts,
-// grouped by emoji. Returns nil when there are no reactions.
-func buildReactionsRow(msg *Message) fyne.CanvasObject {
-	if len(msg.Reactions) == 0 {
-		return nil
+// buildReactionsRow renders a horizontal list of existing reaction chips
+// (grouped + count-sorted) followed by a small "+" button that opens the
+// reaction picker. Always returns a non-nil row — there's always the add
+// affordance even when no one has reacted yet.
+func buildReactionsRow(msg *Message, cv *ChatView) fyne.CanvasObject {
+	chips := make([]fyne.CanvasObject, 0, len(msg.Reactions)+1)
+
+	if len(msg.Reactions) > 0 {
+		counts := map[string]int{}
+		order := []string{}
+		for _, r := range msg.Reactions {
+			if _, ok := counts[r.Emoji]; !ok {
+				order = append(order, r.Emoji)
+			}
+			counts[r.Emoji]++
+		}
+		sort.SliceStable(order, func(i, j int) bool {
+			// Larger counts first; alphabetic tiebreak.
+			if counts[order[i]] != counts[order[j]] {
+				return counts[order[i]] > counts[order[j]]
+			}
+			return order[i] < order[j]
+		})
+		for _, emoji := range order {
+			chips = append(chips, buildReactionChip(emoji, counts[emoji]))
+		}
 	}
 
-	counts := map[string]int{}
-	order := []string{}
-	for _, r := range msg.Reactions {
-		if _, ok := counts[r.Emoji]; !ok {
-			order = append(order, r.Emoji)
+	// "+" button anchored after existing reactions. Created with nil
+	// handler then patched so we have a stable ref to use as the popup
+	// anchor (positioning needs to read its absolute coords).
+	addBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), nil)
+	addBtn.Importance = widget.LowImportance
+	addBtn.OnTapped = func() {
+		if cv != nil {
+			cv.showReactionPickerFor(msg, addBtn)
 		}
-		counts[r.Emoji]++
 	}
-	sort.SliceStable(order, func(i, j int) bool {
-		// Larger counts first; alphabetic tiebreak.
-		if counts[order[i]] != counts[order[j]] {
-			return counts[order[i]] > counts[order[j]]
-		}
-		return order[i] < order[j]
-	})
+	chips = append(chips, addBtn)
 
-	chips := make([]fyne.CanvasObject, 0, len(order))
-	for _, emoji := range order {
-		chip := buildReactionChip(emoji, counts[emoji])
-		chips = append(chips, chip)
-	}
 	return container.NewHBox(chips...)
 }
 
 func buildReactionChip(emoji string, count int) fyne.CanvasObject {
-	bg := canvas.NewRectangle(color.RGBA{R: 0x45, G: 0x47, B: 0x5a, A: 0xc0})
+	bg := canvas.NewRectangle(color.RGBA{R: ctpSurface1.R, G: ctpSurface1.G, B: ctpSurface1.B, A: 0xc0})
 	bg.CornerRadius = 10
 
 	label := emoji

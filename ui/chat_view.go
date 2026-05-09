@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"altzap/client"
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
@@ -18,12 +19,12 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"go.mau.fi/whatsmeow/types"
-	"altzap/client"
 )
 
 type Message struct {
 	ID        string
 	Sender    string
+	SenderJID string // raw JID of the sender ("<user>@<server>"); needed when replying
 	Text      string
 	Timestamp time.Time
 	IsOwn     bool
@@ -56,45 +57,105 @@ type Message struct {
 	Status string
 }
 
-// Catppuccin-derived semantic colors used by the chat UI.
+// Semantic chat-UI colors. Populated by applySemanticColors() — invoked
+// from ApplyPalette so they update on every theme switch.
+//
+// Initialization-at-declaration ("= ctpSurface1") would capture zero RGBA:
+// all package-level var blocks evaluate before any init() function runs,
+// so ctp* vars are still zero at that point. Result was invisible message
+// bubbles because the FillColor was fully transparent.
 var (
-	sidebarBgColor   = ctpMantle
-	chatBgColor      = ctpBase
-	ownMsgBgColor    = ctpSurface1 // outgoing — slightly lifted off the base
-	otherMsgBgColor  = ctpSurface0 // incoming — flush with the surface tier
-	headerGreenColor = ctpMantle   // header reads as a darker shoulder, not loud green
-	whiteColor       = ctpCrust    // for text *on* avatar circles
-	emptyHintColor   = ctpOverlay1
-	timeColor        = ctpOverlay0
-	subtitleColor    = ctpSubtext0
-	selectionTint    = color.RGBA{R: ctpMauve.R, G: ctpMauve.G, B: ctpMauve.B, A: 0x40}
+	sidebarBgColor   color.RGBA
+	chatBgColor      color.RGBA
+	ownMsgBgColor    color.RGBA
+	otherMsgBgColor  color.RGBA
+	headerGreenColor color.RGBA
+	whiteColor       color.RGBA
+	emptyHintColor   color.RGBA
+	timeColor        color.RGBA
+	subtitleColor    color.RGBA
+	dateChipBgColor  color.RGBA
+	selectionTint    color.RGBA
 )
 
+// applySemanticColors derives chat-UI colors from the active ctp* values.
+// Bumped vs. previous mapping: incoming bubbles use Surface1 (was Surface0)
+// and outgoing use Surface2 (was Surface1). Surface0 is too close to Base
+// in some palettes (Tokyo Night, Macchiato), making bubbles invisible.
+func applySemanticColors() {
+	sidebarBgColor = ctpMantle
+	chatBgColor = ctpBase
+	otherMsgBgColor = ctpSurface1
+	ownMsgBgColor = ctpSurface2
+	headerGreenColor = ctpMantle
+	whiteColor = ctpCrust
+	emptyHintColor = ctpOverlay1
+	timeColor = ctpOverlay0
+	subtitleColor = ctpSubtext0
+	dateChipBgColor = color.RGBA{R: ctpSurface0.R, G: ctpSurface0.G, B: ctpSurface0.B, A: 0xc0}
+	// Bumped alpha to 0x55 — Fyne's own list-selection overlay is now off
+	// (theme.ColorNameSelection → transparent), so this tint must carry
+	// the entire "selected chat" signal on its own.
+	selectionTint = color.RGBA{R: ctpMauve.R, G: ctpMauve.G, B: ctpMauve.B, A: 0x55}
+}
+
 type ChatView struct {
-	fyneApp         fyne.App
-	waClient        *client.WhatsAppClient
-	window          fyne.Window
-	searchEntry     *widget.Entry
-	chatList        *widget.List
-	messageList     *widget.List // virtualized: only visible bubbles materialized
-	messageInput    *widget.Entry
-	attachBtn       *widget.Button
-	micBtn          *widget.Button
-	chatTitle       *widget.Label
-	chatSubtitle    *widget.Label
-	lastSubtitle    string
-	chatArea        *fyne.Container
-	chatPlaceholder fyne.CanvasObject
-	chatRealView    fyne.CanvasObject
-	messages        map[string][]*Message
-	muMessages      sync.RWMutex
-	currentChatJID  string
-	cachedChats     []client.Chat
-	allChats        []client.Chat
-	filteredChats   []client.Chat
-	isSearching     bool
-	muCachedChats   sync.RWMutex
-	recorder        recorder
+	fyneApp              fyne.App
+	waClient             *client.WhatsAppClient
+	window               fyne.Window
+	searchEntry          *widget.Entry
+	chatList             *widget.List
+	messageList          *widget.List // virtualized: only visible bubbles materialized
+	messageInput         *widget.Entry
+	attachBtn            *widget.Button
+	micBtn               *widget.Button
+	chatTitle            *widget.Label
+	chatSubtitle         *widget.Label
+	lastSubtitle         string
+	headerAvatarBg       *canvas.Circle
+	headerAvatarInitials *canvas.Text
+	headerAvatarPhoto    *canvas.Image
+
+	// Static-chrome canvas.Rectangles. Their FillColor is captured at
+	// construction; without explicit Refresh on theme switch they keep
+	// the old palette. RefreshAll re-applies the current semantic colors.
+	sidebarPanel    *canvas.Rectangle
+	chatHeaderPanel *canvas.Rectangle
+	chatBgCanvas    *canvas.Rectangle
+	inputBg         *canvas.Rectangle
+
+	// Reply-to-message state. replyingTo == nil means the next sendMessage
+	// is a fresh post; non-nil means it'll be quoted as a reply. The
+	// preview elements are built once in inputBarBuild and updated by
+	// beginReply/cancelReply rather than recreated each time. replyEscPop
+	// is the cleanup returned by pushEsc — non-nil while a reply is
+	// active, called from cancelReply (and ESC).
+	replyingTo            *Message
+	replyPreview          *fyne.Container
+	replyPreviewSenderLbl *widget.Label
+	replyPreviewTextLbl   *widget.Label
+	replyPreviewAccent    *canvas.Rectangle
+	replyEscPop           func()
+
+	// Double-tap detection on the message list — Fyne's widget.List ships
+	// with single-tap selection (we co-opt that path) but no built-in
+	// double-tap. We track the last row tapped + when, and treat two taps
+	// on the same id within a short window as a double-tap → start reply.
+	lastTapID          widget.ListItemID
+	lastTapTime        time.Time
+	chatArea           *fyne.Container
+	chatPlaceholder    fyne.CanvasObject
+	chatRealView       fyne.CanvasObject
+	messages           map[string][]*Message
+	muMessages         sync.RWMutex
+	currentChatJID     string
+	currentChatIsGroup bool
+	cachedChats        []client.Chat
+	allChats           []client.Chat
+	filteredChats      []client.Chat
+	isSearching        bool
+	muCachedChats      sync.RWMutex
+	recorder           recorder
 
 	unread          map[string]int // chat_jid -> unread count (in-memory)
 	muUnread        sync.RWMutex
@@ -356,6 +417,60 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
+// formatChatListTime renders a chat-list timestamp scaled to its age:
+// today → "HH:MM", yesterday → "Yesterday", within a week → "Mon"/"Tue",
+// this year → "Jan 2", older → "DD/MM/YY".
+func formatChatListTime(unix int64) string {
+	if unix <= 0 {
+		return ""
+	}
+	t := time.Unix(unix, 0)
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	if !t.Before(today) {
+		return t.Format("15:04")
+	}
+	if !t.Before(today.AddDate(0, 0, -1)) {
+		return "Yesterday"
+	}
+	if !t.Before(today.AddDate(0, 0, -6)) {
+		return t.Format("Mon")
+	}
+	if t.Year() == now.Year() {
+		return t.Format("Jan 2")
+	}
+	return t.Format("02/01/06")
+}
+
+// formatDateSeparator renders the centered chip between groups of messages
+// from different days: "Today", "Yesterday", weekday name within a week,
+// or full date.
+func formatDateSeparator(t time.Time) string {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	day := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	switch {
+	case day.Equal(today):
+		return "Today"
+	case day.Equal(today.AddDate(0, 0, -1)):
+		return "Yesterday"
+	case !day.Before(today.AddDate(0, 0, -6)):
+		return t.Format("Monday")
+	case t.Year() == now.Year():
+		return t.Format("January 2")
+	default:
+		return t.Format("January 2, 2006")
+	}
+}
+
+// sameDay reports whether a and b fall on the same calendar day in their
+// respective locations.
+func sameDay(a, b time.Time) bool {
+	ay, am, ad := a.Date()
+	by, bm, bd := b.Date()
+	return ay == by && am == bm && ad == bd
+}
+
 func (cv *ChatView) Build() fyne.CanvasObject {
 	// --- Sidebar ---
 	cv.searchEntry = widget.NewEntry()
@@ -371,8 +486,8 @@ func (cv *ChatView) Build() fyne.CanvasObject {
 	cv.chatList = cv.buildChatList()
 	sidebarContent := container.NewBorder(sidebarHeader, nil, nil, nil, cv.chatList)
 
-	sidebarPanel := canvas.NewRectangle(sidebarBgColor)
-	sidebarWithBg := container.NewStack(sidebarPanel, sidebarContent)
+	cv.sidebarPanel = canvas.NewRectangle(sidebarBgColor)
+	sidebarWithBg := container.NewStack(cv.sidebarPanel, sidebarContent)
 
 	// --- Right pane: placeholder + real chat view, swapped on selection ---
 	cv.chatPlaceholder = cv.buildPlaceholder()
@@ -421,27 +536,42 @@ func (cv *ChatView) buildChatRealView() fyne.CanvasObject {
 
 	titleBlock := container.NewVBox(cv.chatTitle, cv.chatSubtitle)
 
+	cv.headerAvatarBg = canvas.NewCircle(ctpMauve)
+	cv.headerAvatarInitials = canvas.NewText("", whiteColor)
+	cv.headerAvatarInitials.TextStyle.Bold = true
+	cv.headerAvatarInitials.TextSize = 16
+	cv.headerAvatarInitials.Alignment = fyne.TextAlignCenter
+	cv.headerAvatarPhoto = canvas.NewImageFromFile("")
+	cv.headerAvatarPhoto.FillMode = canvas.ImageFillContain
+	cv.headerAvatarPhoto.Hide()
+	hdrAvatar := container.NewStack(cv.headerAvatarBg, container.NewCenter(cv.headerAvatarInitials), cv.headerAvatarPhoto)
+	hdrAvatarSized := container.New(layout.NewGridWrapLayout(fyne.NewSize(40, 40)), hdrAvatar)
+
+	searchBtn := widget.NewButtonWithIcon("", theme.SearchIcon(), cv.showChatSearch)
+	searchBtn.Importance = widget.LowImportance
+
+	menuBtn := widget.NewButtonWithIcon("", theme.MoreHorizontalIcon(), nil)
+	menuBtn.Importance = widget.LowImportance
+	menuBtn.OnTapped = func() { cv.showChatMenu(menuBtn) }
+
 	headerRow := container.NewBorder(
 		nil, nil,
-		nil,
-		container.NewHBox(
-			widget.NewButtonWithIcon("", theme.SearchIcon(), func() {}),
-			widget.NewButtonWithIcon("", theme.MoreHorizontalIcon(), func() {}),
-		),
+		container.NewPadded(hdrAvatarSized),
+		container.NewHBox(searchBtn, menuBtn),
 		titleBlock,
 	)
 
-	chatHeaderPanel := canvas.NewRectangle(headerGreenColor)
-	chatHeader := container.NewStack(chatHeaderPanel, container.NewPadded(headerRow))
+	cv.chatHeaderPanel = canvas.NewRectangle(headerGreenColor)
+	chatHeader := container.NewStack(cv.chatHeaderPanel, container.NewPadded(headerRow))
 
 	msgScroll := cv.buildMessageArea()
 
-	chatBgCanvas := canvas.NewRectangle(chatBgColor)
-	msgArea := container.NewStack(chatBgCanvas, msgScroll)
+	cv.chatBgCanvas = canvas.NewRectangle(chatBgColor)
+	msgArea := container.NewStack(cv.chatBgCanvas, msgScroll)
 
 	inputRow := cv.inputBarBuild()
-	inputBg := canvas.NewRectangle(ctpMantle)
-	inputBlock := container.NewStack(inputBg, container.NewPadded(inputRow))
+	cv.inputBg = canvas.NewRectangle(ctpMantle)
+	inputBlock := container.NewStack(cv.inputBg, container.NewPadded(inputRow))
 
 	return container.NewBorder(chatHeader, inputBlock, nil, nil, msgArea)
 }
@@ -468,27 +598,36 @@ func (cv *ChatView) buildChatList() *widget.List {
 
 			nameLabel := widget.NewLabel("")
 			nameLabel.TextStyle.Bold = true
+			nameLabel.Truncation = fyne.TextTruncateEllipsis
+
+			timeText := canvas.NewText("", subtitleColor)
+			timeText.TextSize = 13
+			timeText.Alignment = fyne.TextAlignTrailing
+
+			topRow := container.NewBorder(nil, nil, nil, timeText, nameLabel)
 
 			subLabel := widget.NewLabel("")
 			subLabel.Importance = widget.LowImportance
 			subLabel.Truncation = fyne.TextTruncateEllipsis
 
-			textArea := container.NewVBox(nameLabel, subLabel)
-
 			// Unread badge: green circle with white count, hidden when zero.
 			badgeBg := canvas.NewCircle(ctpGreen)
-			badgeText := canvas.NewText("", ctpCrust)
-			badgeText.TextStyle.Bold = true
-			badgeText.TextSize = 12
-			badgeText.Alignment = fyne.TextAlignCenter
-			badgeStack := container.NewStack(badgeBg, container.NewCenter(badgeText))
-			badgeSized := container.New(layout.NewGridWrapLayout(fyne.NewSize(24, 24)), badgeStack)
+			badgeTextEl := canvas.NewText("", ctpCrust)
+			badgeTextEl.TextStyle.Bold = true
+			badgeTextEl.TextSize = 12
+			badgeTextEl.Alignment = fyne.TextAlignCenter
+			badgeStack := container.NewStack(badgeBg, container.NewCenter(badgeTextEl))
+			badgeSized := container.New(layout.NewGridWrapLayout(fyne.NewSize(22, 22)), badgeStack)
 			badgeWrap := container.NewCenter(badgeSized)
+
+			botRow := container.NewBorder(nil, nil, nil, badgeWrap, subLabel)
+
+			textArea := container.NewVBox(topRow, botRow)
 
 			row := container.NewBorder(
 				nil, nil,
 				container.NewPadded(avatarSized),
-				container.NewPadded(badgeWrap),
+				nil,
 				container.NewPadded(textArea),
 			)
 
@@ -503,15 +642,14 @@ func (cv *ChatView) buildChatList() *widget.List {
 			chat := chats[id]
 
 			// Outer is Stack(selBg, row). Row's NewBorder(top=nil, bottom=nil,
-			// left=avatar, right=badge, center=text) yields Objects in order
-			// [center, left, right] (nil top/bottom are skipped).
+			// left=avatar, right=nil, center=text) yields Objects in order
+			// [center, left] (nil slots are skipped).
 			stackC := item.(*fyne.Container)
 			selBg := stackC.Objects[0].(*canvas.Rectangle)
 			row := stackC.Objects[1].(*fyne.Container)
 
 			textPad := row.Objects[0].(*fyne.Container)
 			avatarPad := row.Objects[1].(*fyne.Container)
-			badgePad := row.Objects[2].(*fyne.Container)
 
 			grid := avatarPad.Objects[0].(*fyne.Container)
 			avatarStack := grid.Objects[0].(*fyne.Container)
@@ -520,14 +658,20 @@ func (cv *ChatView) buildChatList() *widget.List {
 			photo := avatarStack.Objects[2].(*canvas.Image)
 
 			textArea := textPad.Objects[0].(*fyne.Container)
-			nameLabel := textArea.Objects[0].(*widget.Label)
-			subLabel := textArea.Objects[1].(*widget.Label)
+			topRow := textArea.Objects[0].(*fyne.Container)
+			botRow := textArea.Objects[1].(*fyne.Container)
 
-			badgeWrap := badgePad.Objects[0].(*fyne.Container)
+			// topRow Border(left=nil, right=timeText, center=nameLabel) → [nameLabel, timeText]
+			nameLabel := topRow.Objects[0].(*widget.Label)
+			timeText := topRow.Objects[1].(*canvas.Text)
+
+			// botRow Border(left=nil, right=badgeWrap, center=subLabel) → [subLabel, badgeWrap]
+			subLabel := botRow.Objects[0].(*widget.Label)
+			badgeWrap := botRow.Objects[1].(*fyne.Container)
 			badgeSized := badgeWrap.Objects[0].(*fyne.Container)
 			badgeStack := badgeSized.Objects[0].(*fyne.Container)
 			badgeBg := badgeStack.Objects[0].(*canvas.Circle)
-			badgeText := badgeStack.Objects[1].(*fyne.Container).Objects[0].(*canvas.Text)
+			badgeTextEl := badgeStack.Objects[1].(*fyne.Container).Objects[0].(*canvas.Text)
 
 			displayName := chat.DisplayName
 			if displayName == "" {
@@ -540,6 +684,10 @@ func (cv *ChatView) buildChatList() *widget.List {
 				preview = "No messages yet"
 			}
 			subLabel.SetText(truncate(preview, 60))
+
+			timeText.Text = formatChatListTime(chat.LastMessageTime)
+			timeText.Color = subtitleColor
+			timeText.Refresh()
 
 			avatarBg.FillColor = avatarColor(displayName)
 			avatarBg.Refresh()
@@ -561,18 +709,18 @@ func (cv *ChatView) buildChatList() *widget.List {
 			if n > 0 {
 				badgeBg.FillColor = ctpGreen
 				if n > 99 {
-					badgeText.Text = "99+"
+					badgeTextEl.Text = "99+"
 				} else {
-					badgeText.Text = fmt.Sprintf("%d", n)
+					badgeTextEl.Text = fmt.Sprintf("%d", n)
 				}
 				badgeBg.Show()
-				badgeText.Show()
+				badgeTextEl.Show()
 			} else {
 				badgeBg.FillColor = color.RGBA{A: 0}
-				badgeText.Text = ""
+				badgeTextEl.Text = ""
 			}
 			badgeBg.Refresh()
-			badgeText.Refresh()
+			badgeTextEl.Refresh()
 
 			if cv.currentChatJID == chat.JID.String() {
 				selBg.FillColor = selectionTint
@@ -599,6 +747,46 @@ func (cv *ChatView) buildMessageArea() fyne.CanvasObject {
 		cv.messageListUpdate,
 	)
 	cv.messageList.HideSeparators = true
+	cv.lastTapID = -1
+
+	// OnSelected fires whenever a list row is tapped (Fyne's listItem is
+	// Tappable; clicks on inert bubble area land here, clicks on nested
+	// buttons/audio-play stay with those buttons). Two taps on the same row
+	// within doubleTapWindow trigger reply. We immediately UnselectAll
+	// because List.Select is a no-op when the row is already selected, so
+	// without this the second tap would silently never fire OnSelected.
+	cv.messageList.OnSelected = func(id widget.ListItemID) {
+		now := time.Now()
+		isDouble := cv.lastTapID == id && now.Sub(cv.lastTapTime) < 500*time.Millisecond
+		cv.lastTapID = id
+		cv.lastTapTime = now
+		cv.messageList.UnselectAll()
+		if !isDouble {
+			return
+		}
+		cv.lastTapID = -1
+		// Map list ID → message index. Skip the "Load older" pseudo-row.
+		cv.muMessages.RLock()
+		msgs := cv.messages[cv.currentChatJID]
+		start := cv.messageWindowStart(msgs)
+		hasOlder := start > 0
+		msgIdx := id
+		if hasOlder {
+			if id == 0 {
+				cv.muMessages.RUnlock()
+				return
+			}
+			msgIdx = id - 1
+		}
+		actual := start + msgIdx
+		if actual < 0 || actual >= len(msgs) {
+			cv.muMessages.RUnlock()
+			return
+		}
+		msg := msgs[actual]
+		cv.muMessages.RUnlock()
+		cv.beginReply(msg)
+	}
 	return cv.messageList
 }
 
@@ -690,10 +878,35 @@ func (cv *ChatView) messageListUpdate(id widget.ListItemID, item fyne.CanvasObje
 			return
 		}
 		msg := msgs[actual]
+
+		// Sender name appears only on the first received message of a streak
+		// in a group chat (1-1 chats hide it entirely — sender is implied by
+		// alignment). 5 min gap restarts the streak.
+		showSender := cv.currentChatIsGroup && !msg.IsOwn
+		if showSender && actual > 0 {
+			prev := msgs[actual-1]
+			if !prev.IsOwn && prev.Sender == msg.Sender &&
+				msg.Timestamp.Sub(prev.Timestamp) < 5*time.Minute {
+				showSender = false
+			}
+		}
+
+		// Date separator above the first message overall, plus whenever the
+		// calendar day flips. Boundary case (actual=start with hasOlder=true):
+		// the prev-in-array message exists but isn't rendered — we still
+		// compare to keep the timeline correct after Load older expands.
+		var dateSep string
+		switch {
+		case actual == 0:
+			dateSep = formatDateSeparator(msg.Timestamp)
+		case !sameDay(msg.Timestamp, msgs[actual-1].Timestamp):
+			dateSep = formatDateSeparator(msg.Timestamp)
+		}
+
 		cv.muMessages.RUnlock()
 		cacheKey = msg.ID
 		bt0 := time.Now()
-		content = cv.buildMessageBubble(msg)
+		content = cv.buildMessageBubble(msg, showSender, dateSep)
 		bd := time.Since(bt0)
 		cv.muUpdateStats.Lock()
 		cv.updateBubbleNS += bd.Nanoseconds()
@@ -720,12 +933,12 @@ func (cv *ChatView) messageListUpdate(id widget.ListItemID, item fyne.CanvasObje
 	}
 }
 
-func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
+func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep string) fyne.CanvasObject {
 	bubbleBg := canvas.NewRectangle(otherMsgBgColor)
 	if msg.IsOwn {
 		bubbleBg.FillColor = ownMsgBgColor
 	}
-	bubbleBg.CornerRadius = 8
+	bubbleBg.CornerRadius = 12
 
 	parts := make([]fyne.CanvasObject, 0, 6)
 	naturalContentWidth := float32(0)
@@ -739,7 +952,7 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 		}
 	}
 
-	if !msg.IsOwn && msg.Sender != "" && msg.Sender != "Unknown" && msg.Sender != "<nil>" {
+	if showSender && !msg.IsOwn && msg.Sender != "" && msg.Sender != "Unknown" && msg.Sender != "<nil>" {
 		senderText := canvas.NewText(msg.Sender, avatarColor(msg.Sender))
 		senderText.TextStyle.Bold = true
 		senderText.TextSize = 15
@@ -766,7 +979,7 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 				naturalContentWidth = w
 			}
 		case "video":
-			mc := buildVideoBubble(msg)
+			mc := buildVideoBubble(msg, cv.window)
 			parts = append(parts, mc)
 			if w := mc.MinSize().Width; w > naturalContentWidth {
 				naturalContentWidth = w
@@ -806,7 +1019,7 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 			}
 		}
 
-		if rxn := buildReactionsRow(msg); rxn != nil {
+		if rxn := buildReactionsRow(msg, cv); rxn != nil {
 			parts = append(parts, rxn)
 			if w := rxn.MinSize().Width; w > naturalContentWidth {
 				naturalContentWidth = w
@@ -848,13 +1061,34 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 		bubbleW = maxBubbleWidth
 	}
 
-	return container.New(bubbleAlignLayout{rightAlign: msg.IsOwn, fixedWidth: bubbleW}, bubble)
+	bubbleRow := container.New(bubbleAlignLayout{rightAlign: msg.IsOwn, fixedWidth: bubbleW}, bubble)
+
+	if dateSep != "" {
+		return container.NewVBox(buildDateChip(dateSep), bubbleRow)
+	}
+	return bubbleRow
 }
 
-// RefreshAll forces a rebuild of message bubbles and chat-list rows so
-// freshly-applied palette colors show up. Static chrome (chat header,
-// dividers, anything built once) stays with its captured colors until
-// the next interaction; restarting the app picks those up cleanly.
+// buildDateChip is the centered "Today" / "Yesterday" / weekday / date label
+// shown between groups of messages from different days.
+func buildDateChip(text string) fyne.CanvasObject {
+	chipText := canvas.NewText(text, subtitleColor)
+	chipText.TextSize = 12
+	chipText.Alignment = fyne.TextAlignCenter
+	chipText.TextStyle.Bold = true
+
+	chipBg := canvas.NewRectangle(dateChipBgColor)
+	chipBg.CornerRadius = 10
+
+	chip := container.NewStack(chipBg, container.NewPadded(chipText))
+	return container.NewPadded(container.NewCenter(chip))
+}
+
+// RefreshAll forces a rebuild of message bubbles, chat-list rows, and
+// static-chrome rectangles so freshly-applied palette colors show up.
+// canvas.Rectangle FillColors were captured at construction; we re-apply
+// the current semantic colors directly so the rest of the app follows
+// the theme switch.
 //
 // Also clears the per-message bubble height cache: heights computed
 // against the old palette can be slightly off after a switch (different
@@ -864,6 +1098,19 @@ func (cv *ChatView) RefreshAll() {
 	cv.muBubbleHeights.Lock()
 	cv.bubbleHeights = make(map[string]float32)
 	cv.muBubbleHeights.Unlock()
+
+	repaintRect := func(r *canvas.Rectangle, c color.RGBA) {
+		if r == nil {
+			return
+		}
+		r.FillColor = c
+		r.Refresh()
+	}
+	repaintRect(cv.sidebarPanel, sidebarBgColor)
+	repaintRect(cv.chatHeaderPanel, headerGreenColor)
+	repaintRect(cv.chatBgCanvas, chatBgColor)
+	repaintRect(cv.inputBg, ctpMantle)
+
 	if cv.messageList != nil {
 		cv.messageList.Refresh()
 	}
@@ -872,9 +1119,15 @@ func (cv *ChatView) RefreshAll() {
 	}
 }
 
-// refreshMessages rebuilds the visible window and scrolls to the latest
-// message. Cheap with widget.List: only the visible bubbles get
+// refreshMessages rebuilds the visible window and either follows the new
+// bottom (when the user was sitting at/near the latest message) or
+// preserves their current scroll position (when they're reading older
+// content). Cheap with widget.List: only the visible bubbles get
 // re-materialized via UpdateItem — Length changing triggers re-layout.
+//
+// "Near the bottom" = within one viewport-height of the post-refresh max
+// offset. This catches the common case (user has the latest visible) and
+// avoids yanking the view away when they've intentionally scrolled up.
 func (cv *ChatView) refreshMessages() {
 	t0 := time.Now()
 	cv.muUpdateStats.Lock()
@@ -895,6 +1148,29 @@ func (cv *ChatView) refreshMessages() {
 	if cv.messageList == nil {
 		return
 	}
+
+	preOffset := cv.messageList.GetScrollOffset()
+	viewportH := cv.messageList.Size().Height
+
+	cv.messageList.Refresh()
+	cv.messageList.ScrollToBottom()
+
+	// Both scroll calls are synchronous against widget.List's internal
+	// state; only the final scroll position is rendered, so this doesn't
+	// flicker. (The probe ScrollToBottom + read + maybe restore happens
+	// inside one UI tick.)
+	if newBottom := cv.messageList.GetScrollOffset(); newBottom-preOffset > viewportH {
+		cv.messageList.ScrollToOffset(preOffset)
+	}
+}
+
+// scrollToLatest unconditionally jumps to the latest message — used when
+// switching chats so the user lands on the freshest content regardless of
+// where they were in the previous chat.
+func (cv *ChatView) scrollToLatest() {
+	if cv.messageList == nil {
+		return
+	}
 	cv.messageList.Refresh()
 	cv.messageList.ScrollToBottom()
 }
@@ -910,6 +1186,40 @@ func (cv *ChatView) loadOlderMessages() {
 	if cv.messageList != nil {
 		cv.messageList.Refresh()
 	}
+}
+
+// scrollToMessage expands the render window if needed to include msgIdx
+// (index into cv.messages[cv.currentChatJID]) and scrolls the message list
+// to that row. Map of msgIdx → widget.List ID:
+//
+//	id = msgIdx - start    (when no "Load older" row is showing)
+//	id = msgIdx - start + 1 (when start > 0, the first row is the button)
+func (cv *ChatView) scrollToMessage(msgIdx int) {
+	cv.muMessages.RLock()
+	n := len(cv.messages[cv.currentChatJID])
+	cv.muMessages.RUnlock()
+	if msgIdx < 0 || msgIdx >= n || cv.messageList == nil {
+		return
+	}
+
+	if cv.renderLimit <= 0 {
+		cv.renderLimit = initialRenderLimit
+	}
+	if needed := n - msgIdx; needed > cv.renderLimit {
+		cv.renderLimit = needed + renderChunk
+	}
+
+	cv.messageList.Refresh()
+
+	start := 0
+	if n > cv.renderLimit {
+		start = n - cv.renderLimit
+	}
+	listID := msgIdx - start
+	if start > 0 {
+		listID++
+	}
+	cv.messageList.ScrollTo(listID)
 }
 
 func (cv *ChatView) appendMessageBubble(_ *Message) {
@@ -1218,6 +1528,7 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 	}
 
 	cv.currentChatJID = jidStr
+	cv.currentChatIsGroup = parsed.Server == types.GroupServer
 	cv.renderLimit = 0 // back to the default tail size for the new chat
 	cv.resetUnread(jidStr)
 
@@ -1225,7 +1536,6 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 	if _, ok := cv.messages[jidStr]; !ok {
 		cv.messages[jidStr] = cv.loadMessagesFromDisk(jidStr)
 	}
-	msgCount := len(cv.messages[jidStr])
 	cv.muMessages.Unlock()
 
 	title := cv.waClient.LookupName(parsed)
@@ -1233,15 +1543,18 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 		title = jidStr
 	}
 
-	subtitle := "Messages are end-to-end encrypted"
-	if parsed.Server == types.GroupServer {
-		subtitle = "Group chat"
-	}
-	if msgCount > 0 {
-		cv.muMessages.RLock()
-		lastMsg := cv.messages[jidStr][msgCount-1]
-		cv.muMessages.RUnlock()
-		subtitle = "Last message at " + lastMsg.Timestamp.Format("02 Jan 15:04")
+	var subtitle string
+	switch {
+	case parsed.Server == types.GroupServer:
+		subtitle = "Group"
+	default:
+		// PhoneForJID handles both phone-server JIDs (returns User) and LID
+		// JIDs (asks the LID store for the mapped phone). LID mappings
+		// populate over time, so an empty result here is a known case —
+		// fall through to a blank subtitle rather than leak the opaque LID.
+		if phone := cv.waClient.PhoneForJID(parsed); phone != "" {
+			subtitle = "+" + phone
+		}
 	}
 
 	fyne.Do(func() {
@@ -1250,14 +1563,31 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 			cv.chatArea.Objects = []fyne.CanvasObject{cv.chatRealView}
 			cv.chatArea.Refresh()
 		}
+		// Reply state is per-chat — drop any pending reply when switching.
+		cv.cancelReply()
 		if cv.chatTitle != nil {
 			cv.chatTitle.SetText(title)
 		}
 		if cv.chatSubtitle != nil {
 			cv.chatSubtitle.SetText(subtitle)
 		}
+		if cv.headerAvatarBg != nil {
+			cv.headerAvatarBg.FillColor = avatarColor(title)
+			cv.headerAvatarBg.Refresh()
+			cv.headerAvatarInitials.Text = getInitials(title)
+			cv.headerAvatarInitials.Color = whiteColor
+			cv.headerAvatarInitials.Refresh()
+			if cached := client.CachedAvatar(jidStr); cached != "" {
+				cv.headerAvatarPhoto.File = cached
+				cv.headerAvatarPhoto.Refresh()
+				cv.headerAvatarPhoto.Show()
+			} else {
+				cv.headerAvatarPhoto.Hide()
+				cv.maybeFetchAvatar(jidStr)
+			}
+		}
 		if cv.messageList != nil {
-			cv.refreshMessages()
+			cv.scrollToLatest()
 		}
 		if cv.chatList != nil {
 			cv.chatList.Refresh()
@@ -1304,6 +1634,7 @@ func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 		msgs = append(msgs, &Message{
 			ID:                sm.ID,
 			Sender:            sender,
+			SenderJID:         sm.SenderJID,
 			Text:              text,
 			Timestamp:         time.Unix(sm.Timestamp, 0),
 			IsOwn:             sm.FromMe,
@@ -1329,6 +1660,101 @@ func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 	return msgs
 }
 
+// beginReply marks msg as the reply target for the next outgoing message
+// and reveals the preview row above the input bar. Safe to call from any
+// goroutine indirectly — Fyne widgets are touched here, so callers should
+// invoke from the UI thread (DoubleTapped is dispatched on the UI thread
+// already).
+func (cv *ChatView) beginReply(msg *Message) {
+	if msg == nil {
+		return
+	}
+	cv.replyingTo = msg
+
+	senderName := msg.Sender
+	if msg.IsOwn {
+		senderName = "You"
+	}
+	if senderName == "" {
+		senderName = "—"
+	}
+
+	if cv.replyPreviewSenderLbl != nil {
+		cv.replyPreviewSenderLbl.SetText(senderName)
+	}
+	if cv.replyPreviewTextLbl != nil {
+		cv.replyPreviewTextLbl.SetText(previewForMessage(msg))
+	}
+	if cv.replyPreviewAccent != nil {
+		cv.replyPreviewAccent.FillColor = avatarColor(senderName)
+		cv.replyPreviewAccent.Refresh()
+	}
+	if cv.replyPreview != nil {
+		cv.replyPreview.Show()
+	}
+	if cv.messageInput != nil {
+		cv.window.Canvas().Focus(cv.messageInput)
+	}
+	// Replace any prior pop (in case beginReply is called without an
+	// intervening cancelReply — e.g., user double-clicks a different
+	// message while a reply is already pending).
+	if cv.replyEscPop != nil {
+		cv.replyEscPop()
+	}
+	cv.replyEscPop = pushEsc(cv.cancelReply)
+}
+
+// sendReaction emits an emoji reaction targeting msg. Server echoes via
+// OnReactionUpdate, which replaces our in-memory Reactions list — so
+// there's no optimistic local mutation here (would race with the echo
+// and risk doubles). Latency is one round-trip; acceptable for a
+// non-blocking single-button click.
+func (cv *ChatView) sendReaction(msg *Message, emoji string) {
+	if msg == nil || cv.currentChatJID == "" {
+		return
+	}
+	chat, err := types.ParseJID(cv.currentChatJID)
+	if err != nil {
+		return
+	}
+
+	senderJID := msg.SenderJID
+	if senderJID == "" {
+		// Fallback for messages saved before SenderJID was tracked.
+		if msg.IsOwn {
+			if own := cv.waClient.OwnJID(); !own.IsEmpty() {
+				senderJID = own.String()
+			}
+		} else {
+			senderJID = cv.currentChatJID
+		}
+	}
+
+	sender, err := types.ParseJID(senderJID)
+	if err != nil {
+		return
+	}
+
+	go func() {
+		if err := cv.waClient.SendReaction(chat, sender, msg.ID, emoji); err != nil {
+			log.Printf("send reaction (msg=%s emoji=%q): %v", msg.ID, emoji, err)
+		}
+	}()
+}
+
+// cancelReply drops the reply target and hides the preview row. Called
+// from the X button on the preview, on send, on chat switch, and on ESC.
+func (cv *ChatView) cancelReply() {
+	cv.replyingTo = nil
+	if cv.replyPreview != nil {
+		cv.replyPreview.Hide()
+	}
+	if cv.replyEscPop != nil {
+		cv.replyEscPop()
+		cv.replyEscPop = nil
+	}
+}
+
 func (cv *ChatView) sendMessage() {
 	text := strings.TrimSpace(cv.messageInput.Text)
 	if text == "" || cv.currentChatJID == "" {
@@ -1341,9 +1767,34 @@ func (cv *ChatView) sendMessage() {
 		return
 	}
 
-	msgID, err := cv.waClient.SendMessage(jid, text)
-	if err != nil {
-		dialog.ShowError(err, cv.window)
+	rt := cv.replyingTo
+	var reply *client.ReplyTo
+	if rt != nil {
+		senderJID := rt.SenderJID
+		if senderJID == "" && rt.IsOwn {
+			if own := cv.waClient.OwnJID(); !own.IsEmpty() {
+				senderJID = own.String()
+			}
+		}
+		if senderJID == "" {
+			// 1-1 fallback: the chat JID is the only other participant.
+			senderJID = cv.currentChatJID
+		}
+		reply = &client.ReplyTo{
+			MessageID:  rt.ID,
+			SenderJID:  senderJID,
+			QuotedText: previewForMessage(rt),
+		}
+	}
+
+	// Optimistic send: stamp the bubble with a freshly-generated ID, place
+	// it on screen, fire the whatsmeow call in the background. Drops
+	// user-perceived latency from one network round-trip (often 200–500ms
+	// on cellular) to ~0. GenerateMessageID returns "" only when not
+	// connected — there's no path forward for a send in that case.
+	msgID := cv.waClient.GenerateMessageID()
+	if msgID == "" {
+		dialog.ShowError(fmt.Errorf("not connected to WhatsApp"), cv.window)
 		return
 	}
 
@@ -1354,14 +1805,49 @@ func (cv *ChatView) sendMessage() {
 		Timestamp: time.Now(),
 		IsOwn:     true,
 	}
+	if rt != nil {
+		quotedSender := rt.Sender
+		if rt.IsOwn {
+			quotedSender = "You"
+		}
+		newMsg.ReplyToID = rt.ID
+		newMsg.ReplyToSenderName = quotedSender
+		newMsg.ReplyToText = previewForMessage(rt)
+		newMsg.ReplyToMediaType = rt.MediaType
+	}
+
+	chatJID := cv.currentChatJID
 	cv.muMessages.Lock()
-	cv.messages[cv.currentChatJID] = append(cv.messages[cv.currentChatJID], newMsg)
+	cv.messages[chatJID] = append(cv.messages[chatJID], newMsg)
 	cv.muMessages.Unlock()
 
 	cv.messageInput.SetText("")
-	fyne.Do(func() {
-		cv.appendMessageBubble(newMsg)
-	})
+	cv.cancelReply()
+	cv.appendMessageBubble(newMsg)
+
+	// Background send. Server echo is deduped by ID in AddMessage, so the
+	// bubble doesn't double up; receipts upgrade the ✓ to ✓✓ via
+	// OnMessageStatus. On failure roll the bubble back so the user knows.
+	go func() {
+		if _, err := cv.waClient.SendMessage(jid, text, reply, msgID); err != nil {
+			log.Printf("send failed (id=%s): %v", msgID, err)
+			fyne.Do(func() {
+				dialog.ShowError(err, cv.window)
+				cv.muMessages.Lock()
+				msgs := cv.messages[chatJID]
+				for i, m := range msgs {
+					if m.ID == msgID {
+						cv.messages[chatJID] = append(msgs[:i], msgs[i+1:]...)
+						break
+					}
+				}
+				cv.muMessages.Unlock()
+				if chatJID == cv.currentChatJID && cv.messageList != nil {
+					cv.refreshMessages()
+				}
+			})
+		}
+	}()
 }
 
 // ReloadFromDisk drops cached messages and reloads them from store/, then
@@ -1418,6 +1904,7 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	newMsg := &Message{
 		ID:                msg.Info.ID,
 		Sender:            senderName,
+		SenderJID:         msg.SenderJid.String(),
 		Text:              msg.Text,
 		Timestamp:         time.Unix(msg.Timestamp, 0),
 		IsOwn:             msg.Info.IsFromMe,

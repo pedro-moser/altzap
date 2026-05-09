@@ -10,8 +10,8 @@ import (
 // notifySendAvailable is checked once at startup; if missing we silently
 // no-op so the app still works in environments without libnotify.
 var (
-	notifyOnce      sync.Once
-	notifySendPath  string
+	notifyOnce     sync.Once
+	notifySendPath string
 )
 
 // hasNotifySend returns true if the OS has notify-send available.

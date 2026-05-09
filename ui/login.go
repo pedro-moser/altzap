@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"altzap/client"
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
@@ -18,7 +19,6 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/skip2/go-qrcode"
-	"altzap/client"
 )
 
 type qrState struct {

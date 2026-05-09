@@ -134,31 +134,38 @@ func showImageFullscreen(path string, win fyne.Window) {
 	img.FillMode = canvas.ImageFillContain
 
 	var popup *widget.PopUp
-	closeBtn := widget.NewButtonWithIcon("Close", theme.CancelIcon(), func() {
+	var popEsc func()
+
+	dismiss := func() {
+		if popEsc != nil {
+			popEsc()
+			popEsc = nil
+		}
 		if popup != nil {
 			popup.Hide()
 		}
-	})
+	}
+
+	closeBtn := widget.NewButtonWithIcon("Close", theme.CancelIcon(), dismiss)
 	closeBtn.Importance = widget.LowImportance
 
 	openExtBtn := widget.NewButtonWithIcon("Open externally", theme.ZoomFitIcon(), func() {
 		openExternal(path)
-		if popup != nil {
-			popup.Hide()
-		}
+		dismiss()
 	})
 	openExtBtn.Importance = widget.LowImportance
 
 	bottomBar := container.NewHBox(layout.NewSpacer(), openExtBtn, closeBtn)
-	bg := canvas.NewRectangle(color.RGBA{R: 0x11, G: 0x11, B: 0x1b, A: 0xf0})
+	bg := canvas.NewRectangle(color.RGBA{R: ctpCrust.R, G: ctpCrust.G, B: ctpCrust.B, A: 0xf0})
 
 	content := container.NewBorder(nil, container.NewPadded(bottomBar), nil, nil, img)
 	popup = widget.NewPopUp(container.NewStack(bg, content), win.Canvas())
 	popup.Resize(win.Canvas().Size())
 	popup.Show()
+	popEsc = pushEsc(dismiss)
 }
 
-func buildVideoBubble(msg *Message) fyne.CanvasObject {
+func buildVideoBubble(msg *Message, window fyne.Window) fyne.CanvasObject {
 	var thumb fyne.CanvasObject
 	if len(msg.Thumb) > 0 {
 		img := canvas.NewImageFromResource(fyne.NewStaticResource("vthumb_"+msg.ID, msg.Thumb))
@@ -181,7 +188,7 @@ func buildVideoBubble(msg *Message) fyne.CanvasObject {
 		durTxt = fmt.Sprintf("  %d:%02d", msg.Duration/60, msg.Duration%60)
 	}
 	openBtn := widget.NewButtonWithIcon("Play"+durTxt, theme.MediaPlayIcon(), func() {
-		openExternal(msg.MediaPath)
+		showVideoFullscreen(msg.MediaPath, window)
 	})
 	openBtn.Importance = widget.LowImportance
 	if msg.MediaPath == "" {
