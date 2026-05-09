@@ -140,6 +140,12 @@ func (w *WhatsAppClient) downloadAndPatch(msg *events.Message) {
 		return
 	}
 
+	// Pre-bake a .png sibling for stickers/images Fyne can't decode (animated
+	// webp, VP8X+VP8L). Cheap when not needed; one-shot when needed.
+	if strings.HasSuffix(strings.ToLower(target), ".webp") {
+		_ = RenderablePath(target)
+	}
+
 	w.patchMediaPath(chatJID, msgID, target)
 	w.fireMediaReady(chatJID, msgID, target)
 }

@@ -57,6 +57,11 @@ func main() {
 	// Migrate any pre-circular avatar JPGs to circular PNGs (idempotent).
 	client.MigrateLegacyAvatars()
 
+	// Pre-transcode any .webp media into .png siblings so Fyne never sees
+	// formats its decoder rejects (animated webp, VP8X+VP8L). Idempotent;
+	// runs in the background so startup isn't blocked.
+	go client.PreTranscodeWebPMedia()
+
 	waClient := client.NewWhatsAppClient(storeContainer, msgStore)
 	loginUI := ui.NewLoginUI(fApp, waClient, window)
 	var chatView *ui.ChatView

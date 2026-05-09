@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"runtime"
 
+	"altzap/client"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
@@ -76,7 +78,7 @@ func imageContent(msg *Message) fyne.CanvasObject {
 	var img *canvas.Image
 	switch {
 	case msg.MediaPath != "":
-		img = canvas.NewImageFromFile(msg.MediaPath)
+		img = canvas.NewImageFromFile(client.RenderablePath(msg.MediaPath))
 	case len(msg.Thumb) > 0:
 		img = canvas.NewImageFromResource(fyne.NewStaticResource("thumb_"+msg.ID, msg.Thumb))
 	default:
@@ -118,7 +120,7 @@ func showImageFullscreen(path string, win fyne.Window) {
 	if path == "" || win == nil {
 		return
 	}
-	img := canvas.NewImageFromFile(path)
+	img := canvas.NewImageFromFile(client.RenderablePath(path))
 	img.FillMode = canvas.ImageFillContain
 
 	var popup *widget.PopUp
@@ -276,7 +278,7 @@ func buildDocBubble(msg *Message) fyne.CanvasObject {
 func buildStickerBubble(msg *Message) fyne.CanvasObject {
 	const stickerSide float32 = 140
 	if msg.MediaPath != "" {
-		img := canvas.NewImageFromFile(msg.MediaPath)
+		img := canvas.NewImageFromFile(client.RenderablePath(msg.MediaPath))
 		img.FillMode = canvas.ImageFillContain
 		img.SetMinSize(fyne.NewSize(stickerSide, stickerSide))
 		return img
