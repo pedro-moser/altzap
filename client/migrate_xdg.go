@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -165,7 +166,7 @@ func migrateOne(src, dst string) error {
 	if err := moveOrCopy(src, dst); err != nil {
 		return err
 	}
-	fmt.Printf("migrated %s -> %s\n", src, dst)
+	log.Printf("migrated %s -> %s", src, dst)
 	return nil
 }
 
