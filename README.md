@@ -56,12 +56,28 @@ Two SQLite databases sit next to the binary:
 
 Design notes for the bigger decisions live under `docs/superpowers/specs/`.
 
-## Configuration
+## Files and configuration
+
+AltZap follows the XDG Base Directory specification.
+
+**Configs** (`~/.config/altzap/`):
 
 | File | Purpose |
 |------|---------|
-| `~/.config/altzap/theme` | One word: `latte`, `frappe`, `macchiato`, or `mocha`. Hot-reloaded. |
-| `~/.config/altzap/settings.json` | Persisted settings (media autodownload, current theme). |
+| `theme` | One word: `latte`, `frappe`, `macchiato`, or `mocha`. Hot-reloaded. |
+| `settings.json` | Persisted settings (media autodownload, current theme). |
+
+**Data** (`~/.local/share/altzap/`):
+
+| Path | Purpose |
+|------|---------|
+| `whatsapp.db` | Whatsmeow session and device state (managed by the library). |
+| `messages.db` | Local message store (chats, reactions, edits, receipts). |
+| `media/` | Downloaded media organized as `<chat-jid>/<msg-id>.<ext>` plus `avatars/`. |
+
+The data directory honors `XDG_DATA_HOME` if set, and an `ALTZAP_DATA_DIR` environment variable overrides both for portable / dev / testing setups.
+
+The first run after upgrading from v0.1 will move any data found at the working directory (`./whatsapp.db`, `./store/`, `./media/`) into the XDG location automatically.
 
 ## Contributing
 
