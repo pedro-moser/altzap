@@ -6,7 +6,7 @@ Lightweight, native WhatsApp desktop client for Linux. Built in Go with [Fyne](h
 
 ## Why
 
-I couldn't find a What's App Client that was light enough, so I asked my good friend Claude to help me out in this task. AltZap is a Fyne-based Go app that idles around 80 MB and starts in under two seconds.
+I couldn't find a WhatsApp client that was light enough, so I asked my good friend Claude to help me out in this task. AltZap is a Fyne-based Go app that idles around 80 MB and starts in under two seconds.
 
 ## Features
 
