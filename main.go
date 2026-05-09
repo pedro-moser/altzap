@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 
 	"altzap/client"
 	"altzap/ui"
@@ -37,8 +39,18 @@ func main() {
 	// pressing ESC pops + invokes the topmost.
 	ui.InstallEscHandler(window.Canvas())
 
+	dataDir := client.AppDataDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("Failed to read working directory: %v", err)
+	}
+	if err := client.MigrateCWDToXDG(cwd, dataDir); err != nil {
+		log.Fatalf("Failed to migrate legacy data layout: %v", err)
+	}
+
 	logger := waLog.Stdout("Main", "INFO", false)
-	storeContainer, err := sqlstore.New(context.Background(), "sqlite3", "whatsapp.db?_foreign_keys=on", logger)
+	sessionDB := filepath.Join(dataDir, "whatsapp.db") + "?_foreign_keys=on"
+	storeContainer, err := sqlstore.New(context.Background(), "sqlite3", sessionDB, logger)
 	if err != nil {
 		log.Fatalf("Failed to create client store: %v", err)
 	}
@@ -47,13 +59,13 @@ func main() {
 		log.Printf("Warning: could not get device: %v", err)
 	}
 
-	msgStore, err := client.OpenMessageStore("store/messages.db")
+	msgStore, err := client.OpenMessageStore(filepath.Join(dataDir, "messages.db"))
 	if err != nil {
 		log.Fatalf("Failed to open message store: %v", err)
 	}
 	defer msgStore.Close()
 
-	if migrated, err := client.MigrateLegacyJSONLs(msgStore, "store"); err != nil {
+	if migrated, err := client.MigrateLegacyJSONLs(msgStore, dataDir); err != nil {
 		log.Printf("warning: legacy JSONL migration failed: %v", err)
 	} else if migrated > 0 {
 		log.Printf("migrated %d legacy messages from JSONL to SQLite", migrated)
