@@ -38,14 +38,14 @@ var (
 // avatar. Caller should os.Stat to verify the file exists.
 func AvatarPath(jidStr string) string {
 	safe := strings.ReplaceAll(jidStr, ":", "_")
-	return filepath.Join(mediaDir, avatarSubdir, safe+".png")
+	return filepath.Join(MediaDir(), avatarSubdir, safe+".png")
 }
 
 // avatarLegacyJPEGPath is the pre-circular JPEG path. Kept for migration
 // from earlier app versions that stored rectangular JPGs.
 func avatarLegacyJPEGPath(jidStr string) string {
 	safe := strings.ReplaceAll(jidStr, ":", "_")
-	return filepath.Join(mediaDir, avatarSubdir, safe+".jpg")
+	return filepath.Join(MediaDir(), avatarSubdir, safe+".jpg")
 }
 
 // CachedAvatar returns the on-disk path for the best available avatar:
@@ -70,7 +70,7 @@ func fileExists(p string) bool {
 // media/avatars/ to circular PNGs and removes the originals. Idempotent;
 // safe to call on every startup.
 func MigrateLegacyAvatars() {
-	dir := filepath.Join(mediaDir, avatarSubdir)
+	dir := filepath.Join(MediaDir(), avatarSubdir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return

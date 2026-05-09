@@ -13,8 +13,6 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 )
 
-const mediaDir = "media"
-
 // inflightDownloads dedupes concurrent download requests by msgID. Many code
 // paths can race to download the same message (eventHandler + a future
 // HistorySync-triggered backfill), and we don't want to pay double bandwidth.
@@ -59,7 +57,7 @@ func mediaPath(chatJID, msgID, ext string) string {
 		msgID = "unknown"
 	}
 	chatDir := strings.ReplaceAll(chatJID, ":", "_")
-	return filepath.Join(mediaDir, chatDir, msgID+ext)
+	return filepath.Join(MediaDir(), chatDir, msgID+ext)
 }
 
 // pickDownloadable returns the first media-bearing field from a Message proto.

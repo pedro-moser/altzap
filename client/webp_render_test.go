@@ -17,7 +17,7 @@ import (
 // Skipped when no such fixture exists; we don't ship synthetic webp bytes
 // because they wouldn't exercise the same decoder rejection paths.
 func TestRenderablePathTranscodesProblemWebP(t *testing.T) {
-	mediaRoot := filepath.Join("..", "media")
+	mediaRoot := MediaDir()
 	problem := findProblemWebP(mediaRoot)
 	if problem == "" {
 		t.Skip("no stdlib-rejected .webp under ../media — nothing to verify")

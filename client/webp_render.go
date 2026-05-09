@@ -186,7 +186,7 @@ func decodeVP8Frame(body []byte) (image.Image, error) {
 	return m, nil
 }
 
-// PreTranscodeWebPMedia walks mediaDir and transcodes every .webp without a
+// PreTranscodeWebPMedia walks MediaDir() and transcodes every .webp without a
 // sibling .png cache, with bounded concurrency. Idempotent. Designed to be
 // called once at startup in a goroutine — UI never blocks on this.
 func PreTranscodeWebPMedia() {
@@ -204,7 +204,7 @@ func PreTranscodeWebPMedia() {
 	}
 
 	count := 0
-	_ = filepath.Walk(mediaDir, func(p string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(MediaDir(), func(p string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
