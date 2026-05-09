@@ -35,3 +35,26 @@ func resolveAppDataDir() string {
 	}
 	return filepath.Join(home, ".local", "share", "altzap")
 }
+
+// AppConfigDir returns the canonical config directory for AltZap,
+// creating it (with mode 0o755) if missing. Honors XDG_CONFIG_HOME
+// via os.UserConfigDir.
+func AppConfigDir() string {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		log.Fatalf("could not resolve config dir: %v", err)
+	}
+	dir := filepath.Join(base, "altzap")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Fatalf("could not create config dir %q: %v", dir, err)
+	}
+	return dir
+}
+
+// MediaDir returns the directory where downloaded media (chat-jid
+// subdirs and avatars/) live. Equivalent to AppDataDir()+"/media".
+// Does not create the directory itself — call sites already MkdirAll
+// the per-chat sub-paths before writing.
+func MediaDir() string {
+	return filepath.Join(AppDataDir(), "media")
+}
