@@ -111,8 +111,8 @@ type ChatView struct {
 }
 
 const (
-	initialRenderLimit = 100
-	renderChunk        = 100
+	initialRenderLimit = 300
+	renderChunk        = 200
 )
 
 // bubbleAlignLayout places a single bubble child with a pre-decided width,
