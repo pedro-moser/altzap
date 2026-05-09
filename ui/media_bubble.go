@@ -74,11 +74,21 @@ func previewDims(w, h uint32) (float32, float32) {
 
 // imageContent prefers the downloaded file, falls back to the embedded
 // JPEGThumbnail, and finally to a placeholder icon.
+//
+// Pre-decoded via CachedImage so canvas.Image.MinSize doesn't trigger
+// image.Decode synchronously on every layout pass — a real cost during
+// widget.List's SetItemHeight cascade, where a single chat-open could
+// otherwise hit 100+ decodes for a handful of visible bubbles.
 func imageContent(msg *Message) fyne.CanvasObject {
 	var img *canvas.Image
 	switch {
 	case msg.MediaPath != "":
-		img = canvas.NewImageFromFile(client.RenderablePath(msg.MediaPath))
+		path := client.RenderablePath(msg.MediaPath)
+		if decoded := client.CachedImage(path); decoded != nil {
+			img = canvas.NewImageFromImage(decoded)
+		} else {
+			img = canvas.NewImageFromFile(path)
+		}
 	case len(msg.Thumb) > 0:
 		img = canvas.NewImageFromResource(fyne.NewStaticResource("thumb_"+msg.ID, msg.Thumb))
 	default:
@@ -278,7 +288,13 @@ func buildDocBubble(msg *Message) fyne.CanvasObject {
 func buildStickerBubble(msg *Message) fyne.CanvasObject {
 	const stickerSide float32 = 140
 	if msg.MediaPath != "" {
-		img := canvas.NewImageFromFile(client.RenderablePath(msg.MediaPath))
+		path := client.RenderablePath(msg.MediaPath)
+		var img *canvas.Image
+		if decoded := client.CachedImage(path); decoded != nil {
+			img = canvas.NewImageFromImage(decoded)
+		} else {
+			img = canvas.NewImageFromFile(path)
+		}
 		img.FillMode = canvas.ImageFillContain
 		img.SetMinSize(fyne.NewSize(stickerSide, stickerSide))
 		return img
