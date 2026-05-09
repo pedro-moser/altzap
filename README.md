@@ -45,14 +45,14 @@ First run shows a QR code. Scan it with WhatsApp on your phone (Settings → Lin
 ## How it works
 
 ```
-main.go ─┬─ client/  whatsmeow + SQLite persistence (whatsapp.db, store/messages.db)
+main.go ─┬─ client/  whatsmeow + SQLite persistence (whatsapp.db, messages.db)
          └─ ui/      Fyne v2.7 widgets (chat view, login, media, settings)
 ```
 
-Two SQLite databases sit next to the binary:
+Two SQLite databases live under `~/.local/share/altzap/` (see Files and configuration below):
 
 - `whatsapp.db` — whatsmeow session and device state (managed by the library)
-- `store/messages.db` — local message store with O(log N) lookups for receipts and edits
+- `messages.db` — local message store with O(log N) lookups for receipts and edits
 
 Design notes for the bigger decisions live under `docs/superpowers/specs/`.
 
