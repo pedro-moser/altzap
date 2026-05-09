@@ -851,6 +851,27 @@ func (cv *ChatView) buildMessageBubble(msg *Message) fyne.CanvasObject {
 	return container.New(bubbleAlignLayout{rightAlign: msg.IsOwn, fixedWidth: bubbleW}, bubble)
 }
 
+// RefreshAll forces a rebuild of message bubbles and chat-list rows so
+// freshly-applied palette colors show up. Static chrome (chat header,
+// dividers, anything built once) stays with its captured colors until
+// the next interaction; restarting the app picks those up cleanly.
+//
+// Also clears the per-message bubble height cache: heights computed
+// against the old palette can be slightly off after a switch (different
+// font sizes, padding values can carry over from the theme), so a
+// re-measure on next render is the safer default.
+func (cv *ChatView) RefreshAll() {
+	cv.muBubbleHeights.Lock()
+	cv.bubbleHeights = make(map[string]float32)
+	cv.muBubbleHeights.Unlock()
+	if cv.messageList != nil {
+		cv.messageList.Refresh()
+	}
+	if cv.chatList != nil {
+		cv.chatList.Refresh()
+	}
+}
+
 // refreshMessages rebuilds the visible window and scrolls to the latest
 // message. Cheap with widget.List: only the visible bubbles get
 // re-materialized via UpdateItem — Length changing triggers re-layout.

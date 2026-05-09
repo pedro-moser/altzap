@@ -66,6 +66,17 @@ func main() {
 	loginUI := ui.NewLoginUI(fApp, waClient, window)
 	var chatView *ui.ChatView
 
+	// Theme switcher: watches ~/.config/altzap/theme. Any tool (rofi,
+	// KDE/GNOME script, manual edit) writes the theme name there, AltZap
+	// reapplies the palette without restart. ChatView.RefreshAll rolls
+	// new colors into bubbles + sidebar; static chrome (chat header)
+	// stays with old colors until the next interaction or app restart.
+	ui.WatchThemeFile(fApp, func(_ string) {
+		if chatView != nil {
+			fyne.Do(func() { chatView.RefreshAll() })
+		}
+	})
+
 	// System tray (where supported). When present, the close button hides the
 	// window instead of quitting — user uses tray menu's Quit to actually exit.
 	if desk, ok := fApp.(desktop.App); ok {

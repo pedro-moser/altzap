@@ -7,45 +7,96 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
-// Catppuccin Mocha palette — https://github.com/catppuccin/catppuccin
+// Per-color package vars — populated by ApplyPalette(activePalette) in
+// init(). All over the UI code references these directly (74 callsites at
+// time of writing); keeping them as package-level vars rather than
+// function calls means a theme switch only needs ApplyPalette + a
+// widget.List Refresh to roll new colors into freshly-built bubbles.
 var (
-	ctpRosewater = color.RGBA{R: 0xf5, G: 0xe0, B: 0xdc, A: 0xff}
-	ctpFlamingo  = color.RGBA{R: 0xf2, G: 0xcd, B: 0xcd, A: 0xff}
-	ctpPink      = color.RGBA{R: 0xf5, G: 0xc2, B: 0xe7, A: 0xff}
-	ctpMauve     = color.RGBA{R: 0xcb, G: 0xa6, B: 0xf7, A: 0xff}
-	ctpRed       = color.RGBA{R: 0xf3, G: 0x8b, B: 0xa8, A: 0xff}
-	ctpMaroon    = color.RGBA{R: 0xeb, G: 0xa0, B: 0xac, A: 0xff}
-	ctpPeach     = color.RGBA{R: 0xfa, G: 0xb3, B: 0x87, A: 0xff}
-	ctpYellow    = color.RGBA{R: 0xf9, G: 0xe2, B: 0xaf, A: 0xff}
-	ctpGreen     = color.RGBA{R: 0xa6, G: 0xe3, B: 0xa1, A: 0xff}
-	ctpTeal      = color.RGBA{R: 0x94, G: 0xe2, B: 0xd5, A: 0xff}
-	ctpSky       = color.RGBA{R: 0x89, G: 0xdc, B: 0xeb, A: 0xff}
-	ctpSapphire  = color.RGBA{R: 0x74, G: 0xc7, B: 0xec, A: 0xff}
-	ctpBlue      = color.RGBA{R: 0x89, G: 0xb4, B: 0xfa, A: 0xff}
-	ctpLavender  = color.RGBA{R: 0xb4, G: 0xbe, B: 0xfe, A: 0xff}
+	ctpRosewater color.RGBA
+	ctpFlamingo  color.RGBA
+	ctpPink      color.RGBA
+	ctpMauve     color.RGBA
+	ctpRed       color.RGBA
+	ctpMaroon    color.RGBA
+	ctpPeach     color.RGBA
+	ctpYellow    color.RGBA
+	ctpGreen     color.RGBA
+	ctpTeal      color.RGBA
+	ctpSky       color.RGBA
+	ctpSapphire  color.RGBA
+	ctpBlue      color.RGBA
+	ctpLavender  color.RGBA
 
-	ctpText     = color.RGBA{R: 0xcd, G: 0xd6, B: 0xf4, A: 0xff}
-	ctpSubtext1 = color.RGBA{R: 0xba, G: 0xc2, B: 0xde, A: 0xff}
-	ctpSubtext0 = color.RGBA{R: 0xa6, G: 0xad, B: 0xc8, A: 0xff}
-	ctpOverlay2 = color.RGBA{R: 0x93, G: 0x99, B: 0xb2, A: 0xff}
-	ctpOverlay1 = color.RGBA{R: 0x7f, G: 0x84, B: 0x9c, A: 0xff}
-	ctpOverlay0 = color.RGBA{R: 0x6c, G: 0x70, B: 0x86, A: 0xff}
-	ctpSurface2 = color.RGBA{R: 0x58, G: 0x5b, B: 0x70, A: 0xff}
-	ctpSurface1 = color.RGBA{R: 0x45, G: 0x47, B: 0x5a, A: 0xff}
-	ctpSurface0 = color.RGBA{R: 0x31, G: 0x32, B: 0x44, A: 0xff}
-	ctpBase     = color.RGBA{R: 0x1e, G: 0x1e, B: 0x2e, A: 0xff}
-	ctpMantle   = color.RGBA{R: 0x18, G: 0x18, B: 0x25, A: 0xff}
-	ctpCrust    = color.RGBA{R: 0x11, G: 0x11, B: 0x1b, A: 0xff}
+	ctpText     color.RGBA
+	ctpSubtext1 color.RGBA
+	ctpSubtext0 color.RGBA
+	ctpOverlay2 color.RGBA
+	ctpOverlay1 color.RGBA
+	ctpOverlay0 color.RGBA
+	ctpSurface2 color.RGBA
+	ctpSurface1 color.RGBA
+	ctpSurface0 color.RGBA
+	ctpBase     color.RGBA
+	ctpMantle   color.RGBA
+	ctpCrust    color.RGBA
 )
 
-type catppuccinTheme struct{}
-
-// CatppuccinTheme returns a fyne.Theme implementing Catppuccin Mocha.
-func CatppuccinTheme() fyne.Theme {
-	return catppuccinTheme{}
+func init() {
+	ApplyPalette(activePalette)
 }
 
-func (catppuccinTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
+// ApplyPalette swaps the active palette into the package-level color vars
+// so subsequent widget construction reads the new palette. Returns the
+// palette so callers can chain (mostly for tests).
+//
+// Note: existing canvas.Rectangle.FillColor (and similar) keep their
+// captured-at-construction values until the owning widget is rebuilt.
+// For chat content, that happens naturally via widget.List.Refresh
+// triggering UpdateItem; static chrome (chat header, separators) stays
+// stale until the next interaction or a window-content rebuild.
+func ApplyPalette(p Palette) Palette {
+	activePalette = p
+	ctpRosewater = p.Rosewater
+	ctpFlamingo = p.Flamingo
+	ctpPink = p.Pink
+	ctpMauve = p.Mauve
+	ctpRed = p.Red
+	ctpMaroon = p.Maroon
+	ctpPeach = p.Peach
+	ctpYellow = p.Yellow
+	ctpGreen = p.Green
+	ctpTeal = p.Teal
+	ctpSky = p.Sky
+	ctpSapphire = p.Sapphire
+	ctpBlue = p.Blue
+	ctpLavender = p.Lavender
+	ctpText = p.Text
+	ctpSubtext1 = p.Subtext1
+	ctpSubtext0 = p.Subtext0
+	ctpOverlay2 = p.Overlay2
+	ctpOverlay1 = p.Overlay1
+	ctpOverlay0 = p.Overlay0
+	ctpSurface2 = p.Surface2
+	ctpSurface1 = p.Surface1
+	ctpSurface0 = p.Surface0
+	ctpBase = p.Base
+	ctpMantle = p.Mantle
+	ctpCrust = p.Crust
+	return p
+}
+
+type paletteTheme struct{}
+
+// CatppuccinTheme returns a fyne.Theme that delegates color/size lookups
+// to the active palette. Kept under this name for source compatibility —
+// the same symbol now powers Tokyo Night, Gruvbox, Nord, and any palette
+// you set via ApplyPalette.
+func CatppuccinTheme() fyne.Theme {
+	return paletteTheme{}
+}
+
+func (paletteTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
 	switch name {
 	case theme.ColorNameBackground:
 		return ctpBase
@@ -107,15 +158,15 @@ func (catppuccinTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) colo
 	return theme.DefaultTheme().Color(name, theme.VariantDark)
 }
 
-func (catppuccinTheme) Font(s fyne.TextStyle) fyne.Resource {
+func (paletteTheme) Font(s fyne.TextStyle) fyne.Resource {
 	return theme.DefaultTheme().Font(s)
 }
 
-func (catppuccinTheme) Icon(n fyne.ThemeIconName) fyne.Resource {
+func (paletteTheme) Icon(n fyne.ThemeIconName) fyne.Resource {
 	return theme.DefaultTheme().Icon(n)
 }
 
-func (catppuccinTheme) Size(n fyne.ThemeSizeName) float32 {
+func (paletteTheme) Size(n fyne.ThemeSizeName) float32 {
 	switch n {
 	case theme.SizeNameText:
 		return 18
