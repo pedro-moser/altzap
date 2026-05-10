@@ -153,6 +153,91 @@ var paletteNord = Palette{
 	Base: rgb(0x2e3440), Mantle: rgb(0x272b35), Crust: rgb(0x21252e),
 }
 
+// Dracula — https://draculatheme.com. Famous purple/pink/cyan dark theme.
+// Mapping: Pink #ff79c6 → Pink/Flamingo, Purple #bd93f9 → Mauve/Lavender,
+// Cyan #8be9fd → Sky/Sapphire, Comment #6272a4 → Overlay0 (mid blue-grey).
+// Surfaces interpolate between Selection #44475a and Background #282a36.
+var paletteDracula = Palette{
+	Rosewater: rgb(0xff79c6), Flamingo: rgb(0xff79c6), Pink: rgb(0xff79c6),
+	Mauve: rgb(0xbd93f9), Red: rgb(0xff5555), Maroon: rgb(0xff6e6e),
+	Peach: rgb(0xffb86c), Yellow: rgb(0xf1fa8c), Green: rgb(0x50fa7b),
+	Teal: rgb(0x8be9fd), Sky: rgb(0x8be9fd), Sapphire: rgb(0x8be9fd),
+	Blue: rgb(0x6272a4), Lavender: rgb(0xbd93f9),
+	Text: rgb(0xf8f8f2), Subtext1: rgb(0xe2e2dc), Subtext0: rgb(0xc7c7c1),
+	Overlay2: rgb(0x9ba0bf), Overlay1: rgb(0x7e84a3), Overlay0: rgb(0x6272a4),
+	Surface2: rgb(0x565973), Surface1: rgb(0x4a4d63), Surface0: rgb(0x44475a),
+	Base: rgb(0x282a36), Mantle: rgb(0x21222c), Crust: rgb(0x191a21),
+}
+
+// Everforest Dark (Medium) — https://github.com/sainnhe/everforest.
+// Soft green/forest dark theme. Mapping: green #a7c080 → Green/Teal,
+// aqua #83c092 → Teal, blue #7fbbb3 → Sky/Sapphire/Blue,
+// purple #d699b6 → Pink/Mauve/Lavender, fg #d3c6aa → Text.
+var paletteEverforestDark = Palette{
+	Rosewater: rgb(0xe67e80), Flamingo: rgb(0xe69875), Pink: rgb(0xd699b6),
+	Mauve: rgb(0xd699b6), Red: rgb(0xe67e80), Maroon: rgb(0xe67e80),
+	Peach: rgb(0xe69875), Yellow: rgb(0xdbbc7f), Green: rgb(0xa7c080),
+	Teal: rgb(0x83c092), Sky: rgb(0x7fbbb3), Sapphire: rgb(0x7fbbb3),
+	Blue: rgb(0x7fbbb3), Lavender: rgb(0xd699b6),
+	Text: rgb(0xd3c6aa), Subtext1: rgb(0x9da9a0), Subtext0: rgb(0x859289),
+	Overlay2: rgb(0x7a8478), Overlay1: rgb(0x56635f), Overlay0: rgb(0x4f585e),
+	Surface2: rgb(0x475258), Surface1: rgb(0x3d484d), Surface0: rgb(0x343f44),
+	Base: rgb(0x2d353b), Mantle: rgb(0x272e33), Crust: rgb(0x232a2e),
+}
+
+// Kanagawa Wave — https://github.com/rebelot/kanagawa.nvim.
+// Inspired by Hokusai's "The Great Wave"; muted earthy/inky palette.
+// Mapping: oniViolet #957fb8 → Mauve, sakuraPink #d27e99 → Pink,
+// crystalBlue #7e9cd8 → Blue, springBlue #7fb4ca → Sapphire/Sky,
+// waveAqua2 #7aa89f → Teal, springGreen #98bb6c → Green,
+// carpYellow #e6c384 → Yellow, surimiOrange #ffa066 → Peach,
+// peachRed #ff5d62 → Red, fujiWhite #dcd7ba → Text.
+var paletteKanagawaWave = Palette{
+	Rosewater: rgb(0xd27e99), Flamingo: rgb(0xe46876), Pink: rgb(0xd27e99),
+	Mauve: rgb(0x957fb8), Red: rgb(0xff5d62), Maroon: rgb(0xe82424),
+	Peach: rgb(0xffa066), Yellow: rgb(0xe6c384), Green: rgb(0x98bb6c),
+	Teal: rgb(0x7aa89f), Sky: rgb(0xa3d4d5), Sapphire: rgb(0x7fb4ca),
+	Blue: rgb(0x7e9cd8), Lavender: rgb(0x9cabca),
+	Text: rgb(0xdcd7ba), Subtext1: rgb(0xc8c093), Subtext0: rgb(0x938aa9),
+	Overlay2: rgb(0x727169), Overlay1: rgb(0x658594), Overlay0: rgb(0x54546d),
+	Surface2: rgb(0x363646), Surface1: rgb(0x2a2a37), Surface0: rgb(0x223249),
+	Base: rgb(0x1f1f28), Mantle: rgb(0x181820), Crust: rgb(0x16161d),
+}
+
+// Oxocarbon Dark — https://github.com/nyoom-engineering/oxocarbon.
+// IBM Carbon-inspired high-contrast accessible (WCAG 2.1) dark theme.
+// Mapping uses base16 slots: base09 #78a9ff → Blue, base0E #be95ff → Mauve,
+// base0C #ff7eb6 → Pink, base0D #42be65 → Green, base0B #33b1ff → Sky,
+// base08 #3ddbd9 → Teal, base07 #08bdba → cooler teal, base0A #ee5396 → Red.
+var paletteOxocarbon = Palette{
+	Rosewater: rgb(0xff7eb6), Flamingo: rgb(0xff7eb6), Pink: rgb(0xff7eb6),
+	Mauve: rgb(0xbe95ff), Red: rgb(0xee5396), Maroon: rgb(0xee5396),
+	Peach: rgb(0xff7eb6), Yellow: rgb(0x42be65), Green: rgb(0x42be65),
+	Teal: rgb(0x3ddbd9), Sky: rgb(0x33b1ff), Sapphire: rgb(0x82cfff),
+	Blue: rgb(0x78a9ff), Lavender: rgb(0xbe95ff),
+	Text: rgb(0xf2f4f8), Subtext1: rgb(0xdde1e6), Subtext0: rgb(0xb6b8bb),
+	Overlay2: rgb(0x8d8f91), Overlay1: rgb(0x6e7073), Overlay0: rgb(0x525252),
+	Surface2: rgb(0x484848), Surface1: rgb(0x393939), Surface0: rgb(0x262626),
+	Base: rgb(0x161616), Mantle: rgb(0x131313), Crust: rgb(0x0a0a0a),
+}
+
+// Rose Pine Main — https://rosepinetheme.com. Soho vibes; muted natural dark.
+// Mapping: Iris #c4a7e7 → Mauve/Lavender, Love #eb6f92 → Red/Pink,
+// Rose #ebbcba → Rosewater/Flamingo, Gold #f6c177 → Yellow/Peach,
+// Foam #9ccfd8 → Sky/Sapphire/Teal, Pine #31748f → Blue.
+// Surfaces use Highlight Low/Med/High between Surface and Base.
+var paletteRosePine = Palette{
+	Rosewater: rgb(0xebbcba), Flamingo: rgb(0xebbcba), Pink: rgb(0xeb6f92),
+	Mauve: rgb(0xc4a7e7), Red: rgb(0xeb6f92), Maroon: rgb(0xeb6f92),
+	Peach: rgb(0xf6c177), Yellow: rgb(0xf6c177), Green: rgb(0x9ccfd8),
+	Teal: rgb(0x9ccfd8), Sky: rgb(0x9ccfd8), Sapphire: rgb(0x9ccfd8),
+	Blue: rgb(0x31748f), Lavender: rgb(0xc4a7e7),
+	Text: rgb(0xe0def4), Subtext1: rgb(0x908caa), Subtext0: rgb(0x6e6a86),
+	Overlay2: rgb(0x524f67), Overlay1: rgb(0x403d52), Overlay0: rgb(0x393552),
+	Surface2: rgb(0x2a2740), Surface1: rgb(0x26233a), Surface0: rgb(0x21202e),
+	Base: rgb(0x191724), Mantle: rgb(0x16141f), Crust: rgb(0x12101b),
+}
+
 // activePalette is the live source of truth; ctp* color vars in theme.go
 // are refreshed from it via ApplyPalette.
 var activePalette = paletteCatppuccinMocha
@@ -179,6 +264,16 @@ func paletteByName(name string) (Palette, bool) {
 		return paletteGruvboxLight, true
 	case "nord":
 		return paletteNord, true
+	case "dracula":
+		return paletteDracula, true
+	case "everforest-dark", "everforest":
+		return paletteEverforestDark, true
+	case "kanagawa-wave", "kanagawa":
+		return paletteKanagawaWave, true
+	case "oxocarbon":
+		return paletteOxocarbon, true
+	case "rose-pine", "rosepine":
+		return paletteRosePine, true
 	}
 	return Palette{}, false
 }
@@ -193,6 +288,11 @@ func AvailableThemes() []string {
 		"tokyo-night", "tokyo-night-day",
 		"gruvbox-dark", "gruvbox-light",
 		"nord",
+		"dracula",
+		"rose-pine",
+		"kanagawa-wave",
+		"everforest-dark",
+		"oxocarbon",
 	}
 }
 
