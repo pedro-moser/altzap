@@ -106,7 +106,7 @@ type ChatView struct {
 	searchEntry          *widget.Entry
 	chatList             *widget.List
 	messageList          *widget.List // virtualized: only visible bubbles materialized
-	messageInput         *widget.Entry
+	messageInput         *pasteAwareEntry
 	attachBtn            *widget.Button
 	micBtn               *widget.Button
 	chatTitle            *widget.Label
@@ -181,6 +181,19 @@ type ChatView struct {
 	// Render-time limit for the open chat: 0 means default. Reset on chat
 	// switch; "Load older" bumps by renderChunk.
 	renderLimit int
+
+	// Reply mode (Ctrl+R): when active, replyTargetID identifies the
+	// bubble currently highlighted as the quote target. replyModeEscPop
+	// holds the dismiss callback registered on the ESC stack;
+	// replyPrevFocused is the focusable widget that had focus before
+	// reply mode took over (restored on cancel).
+	replyMode        bool
+	replyTargetID    string
+	replyModeEscPop  func()
+	replyPrevFocused fyne.Focusable
+
+	// Search mode: searchEscPop holds the ESC dismiss for openSearch().
+	searchEscPop func()
 }
 
 const (
