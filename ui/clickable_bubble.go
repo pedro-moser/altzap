@@ -34,7 +34,8 @@ func (cb *clickableBubble) CreateRenderer() fyne.WidgetRenderer {
 
 // MouseDown is called by the desktop driver for any mouse press over the
 // widget. We only act on the tertiary (middle) button; primary/secondary
-// pass through so existing tap/hyperlink handlers in `content` keep working.
+// fall through so the wrapped content's own handlers (text selection
+// later, hyperlink taps now) keep working.
 func (cb *clickableBubble) MouseDown(e *desktop.MouseEvent) {
 	if e == nil || e.Button != desktop.MouseButtonTertiary {
 		return

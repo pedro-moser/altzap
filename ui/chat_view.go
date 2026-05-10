@@ -1014,6 +1014,21 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 				if textNatural+bubblePadding > maxBubbleWidth {
 					body = buildMessageText(msg.Text, true)
 				}
+				// Wrap the body text in a Mouseable so middle-click directly
+				// over the text triggers copy. Wrapping the whole bubble
+				// didn't dispatch — Fyne's hit test prefers the deepest
+				// matching widget in DFS order; siblings inside the bubble
+				// (Hyperlinks, the reaction "+" Button, etc.) match Tappable
+				// and override an outer Mouseable. Wrapping just the text
+				// keeps the Mouseable wrapper closer to the leaf.
+				if cv.window != nil && !msg.Deleted {
+					textCopy := msg.Text
+					body = newClickableBubble(body, func() {
+						if c := cv.window.Clipboard(); c != nil {
+							c.SetContent(textCopy)
+						}
+					})
+				}
 				parts = append(parts, body)
 				if textNatural > naturalContentWidth {
 					naturalContentWidth = textNatural
@@ -1058,24 +1073,12 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 	bubbleInner := container.NewVBox(parts...)
 	bubble := container.NewStack(bubbleBg, container.NewPadded(bubbleInner))
 
-	// Middle-click on the bubble copies the body to the clipboard
-	// (mirrors WhatsApp Web's idiom). Skipped for deleted bubbles and
-	// when there's no text payload (pure stickers, media without
-	// caption) — nothing useful to copy.
-	var bubbleCanvas fyne.CanvasObject = bubble
-	if !msg.Deleted && msg.Text != "" && cv.window != nil {
-		body := msg.Text
-		bubbleCanvas = newClickableBubble(bubble, func() {
-			cv.window.Clipboard().SetContent(body)
-		})
-	}
-
 	bubbleW := naturalContentWidth + bubblePadding
 	if bubbleW > maxBubbleWidth {
 		bubbleW = maxBubbleWidth
 	}
 
-	bubbleRow := container.New(bubbleAlignLayout{rightAlign: msg.IsOwn, fixedWidth: bubbleW}, bubbleCanvas)
+	bubbleRow := container.New(bubbleAlignLayout{rightAlign: msg.IsOwn, fixedWidth: bubbleW}, bubble)
 
 	if dateSep != "" {
 		return container.NewVBox(buildDateChip(dateSep), bubbleRow)
