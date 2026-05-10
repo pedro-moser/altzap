@@ -26,10 +26,18 @@ func (cv *ChatView) installShortcuts() {
 	canvas := cv.window.Canvas()
 
 	register := func(key fyne.KeyName, handler func()) {
-		canvas.AddShortcut(&desktop.CustomShortcut{
+		shortcut := &desktop.CustomShortcut{
 			KeyName:  key,
 			Modifier: fyne.KeyModifierControl,
-		}, func(_ fyne.Shortcut) { handler() })
+		}
+		canvas.AddShortcut(shortcut, func(_ fyne.Shortcut) { handler() })
+		// Mirror onto the composer so the chord still fires when the
+		// entry has focus — widget.Entry is fyne.Shortcutable and Fyne
+		// dispatches focused-widget shortcuts exclusively, silently
+		// dropping anything Entry doesn't itself recognize.
+		if cv.messageInput != nil {
+			cv.messageInput.AddCustomShortcut(shortcut, handler)
+		}
 	}
 
 	register(fyne.KeyJ, func() {
