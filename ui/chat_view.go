@@ -1339,6 +1339,8 @@ func (cv *ChatView) loadChatList() {
 		return activeChats[i].LastMessageTime > activeChats[j].LastMessageTime
 	})
 
+	activeChats = dedupeLIDPNTwins(activeChats, cv.waClient.PhoneForJID)
+
 	cv.muCachedChats.Lock()
 	cv.cachedChats = activeChats
 	cv.muCachedChats.Unlock()
@@ -1411,7 +1413,18 @@ func (cv *ChatView) onNewChat() {
 		if c.Name != "" {
 			return c.Name
 		}
-		return c.JID.User
+		// LID JIDs in ContactCache come back without names from the
+		// server; LookupName resolves the underlying phone-number JID
+		// and returns its contact's name (or the phone, never the hash).
+		return cv.waClient.LookupName(c.JID)
+	}
+
+	phoneSubtitle := func(c client.Contact) string {
+		pn := cv.waClient.PhoneForJID(c.JID)
+		if pn == "" {
+			return ""
+		}
+		return "+" + pn
 	}
 
 	visible := contacts // current filtered slice
@@ -1459,7 +1472,7 @@ func (cv *ChatView) onNewChat() {
 
 			name := displayName(c)
 			nameLbl.SetText(name)
-			subLbl.SetText("+" + c.JID.User)
+			subLbl.SetText(phoneSubtitle(c))
 			avatarBg.FillColor = avatarColor(name)
 			avatarBg.Refresh()
 			initials.Text = getInitials(name)
