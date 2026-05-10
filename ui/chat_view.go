@@ -969,7 +969,18 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 
 	if !msg.Deleted {
 		if reply := buildReplyBox(msg); reply != nil {
-			parts = append(parts, reply)
+			// Tap the quote preview to jump to the original message
+			// (mirrors WhatsApp's behavior). No-op when the original
+			// is outside the currently rendered window — Pedro can
+			// hit "Load older" first, or we'll auto-expand in v2.
+			var part fyne.CanvasObject = reply
+			if msg.ReplyToID != "" {
+				originID := msg.ReplyToID
+				part = newTappableBox(reply, func() {
+					cv.scrollToMessageByID(originID)
+				})
+			}
+			parts = append(parts, part)
 			if w := reply.MinSize().Width; w > naturalContentWidth {
 				naturalContentWidth = w
 			}
@@ -1807,6 +1818,24 @@ func (cv *ChatView) scrollToReplyTarget() {
 	}
 	cv.muMessages.RLock()
 	idx := indexOfMsg(cv.messages[cv.currentChatJID], cv.replyTargetID)
+	cv.muMessages.RUnlock()
+	if idx < 0 {
+		return
+	}
+	cv.scrollToMessage(idx)
+}
+
+// scrollToMessageByID locates a message in the open chat by ID and
+// scrolls the list to it. Used by the reply quote preview's tap
+// handler to jump to the original message. Silent no-op if the ID is
+// outside the currently rendered window — the user can hit "Load
+// older" to bring older history into view first.
+func (cv *ChatView) scrollToMessageByID(id string) {
+	if id == "" || cv.currentChatJID == "" {
+		return
+	}
+	cv.muMessages.RLock()
+	idx := indexOfMsg(cv.messages[cv.currentChatJID], id)
 	cv.muMessages.RUnlock()
 	if idx < 0 {
 		return
