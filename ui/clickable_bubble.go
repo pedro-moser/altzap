@@ -6,23 +6,25 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// clickableBubble wraps a bubble's visible content and intercepts middle-
-// mouse clicks (the WhatsApp-Web idiom for "copy this message"). All other
-// pointer events fall through to the wrapped content via the renderer.
+// clickableBubble wraps a bubble's visible content and intercepts mouse
+// gestures the bubble cares about: middle-click for copy and double-click
+// for reply. Implements Tappable so left-clicks don't fall through to
+// some surprise inner widget; the single-tap callback is a no-op by
+// default but can be wired for future selection behavior.
 type clickableBubble struct {
 	widget.BaseWidget
 	content       fyne.CanvasObject
 	onMiddleClick func()
+	onDoubleClick func()
 }
 
-// newClickableBubble wraps content so that middle-clicking it invokes
-// onMiddleClick. Pass nil onMiddleClick to skip handling (still wraps —
-// useful for keeping the widget tree shape uniform across deleted vs
-// regular bubbles).
-func newClickableBubble(content fyne.CanvasObject, onMiddleClick func()) *clickableBubble {
+// newClickableBubble wraps content with mouse-event capture. Either
+// callback may be nil; the corresponding event becomes a no-op.
+func newClickableBubble(content fyne.CanvasObject, onMiddleClick, onDoubleClick func()) *clickableBubble {
 	cb := &clickableBubble{
 		content:       content,
 		onMiddleClick: onMiddleClick,
+		onDoubleClick: onDoubleClick,
 	}
 	cb.ExtendBaseWidget(cb)
 	return cb
@@ -48,3 +50,17 @@ func (cb *clickableBubble) MouseDown(e *desktop.MouseEvent) {
 // MouseUp completes the desktop.Mouseable contract; we don't need the
 // release signal but Fyne expects both methods on the interface.
 func (cb *clickableBubble) MouseUp(*desktop.MouseEvent) {}
+
+// Tapped is a no-op. It exists so we satisfy fyne.Tappable — Fyne's
+// dispatch otherwise would mark a left-click on the wrapper as
+// "unhandled" and bubble it past us, occasionally re-triggering the
+// surrounding widget.List's row-selection in surprising ways.
+func (cb *clickableBubble) Tapped(*fyne.PointEvent) {}
+
+// DoubleTapped fires on a double left-click; mapped to the reply
+// gesture (mirroring the WhatsApp Web idiom of "double-click to quote").
+func (cb *clickableBubble) DoubleTapped(*fyne.PointEvent) {
+	if cb.onDoubleClick != nil {
+		cb.onDoubleClick()
+	}
+}

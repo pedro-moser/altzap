@@ -1014,20 +1014,25 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 				if textNatural+bubblePadding > maxBubbleWidth {
 					body = buildMessageText(msg.Text, true)
 				}
-				// Wrap the body text in a Mouseable so middle-click directly
-				// over the text triggers copy. Wrapping the whole bubble
-				// didn't dispatch — Fyne's hit test prefers the deepest
-				// matching widget in DFS order; siblings inside the bubble
-				// (Hyperlinks, the reaction "+" Button, etc.) match Tappable
-				// and override an outer Mouseable. Wrapping just the text
-				// keeps the Mouseable wrapper closer to the leaf.
+				// Wrap the body text in a Mouseable+Tappable+DoubleTappable
+				// so middle-click over the text copies and double-click
+				// quotes-to-reply. Wrapping the whole bubble didn't
+				// dispatch — Fyne's hit test prefers the deepest matching
+				// widget in DFS order; siblings inside the bubble
+				// (Hyperlinks, the reaction "+" Button) match Tappable and
+				// override an outer wrapper. Wrapping just the text keeps
+				// the wrapper closer to the leaf.
 				if cv.window != nil && !msg.Deleted {
 					textCopy := msg.Text
-					body = newClickableBubble(body, func() {
-						if c := cv.window.Clipboard(); c != nil {
-							c.SetContent(textCopy)
-						}
-					})
+					replyTarget := msg
+					body = newClickableBubble(body,
+						func() {
+							if c := cv.window.Clipboard(); c != nil {
+								c.SetContent(textCopy)
+							}
+						},
+						func() { cv.beginReply(replyTarget) },
+					)
 				}
 				parts = append(parts, body)
 				if textNatural > naturalContentWidth {

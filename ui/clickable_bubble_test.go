@@ -3,13 +3,14 @@ package ui
 import (
 	"testing"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 )
 
 func TestClickableBubble_MiddleButtonInvokesCallback(t *testing.T) {
 	calls := 0
-	cb := newClickableBubble(widget.NewLabel("hi"), func() { calls++ })
+	cb := newClickableBubble(widget.NewLabel("hi"), func() { calls++ }, nil)
 
 	cb.MouseDown(&desktop.MouseEvent{Button: desktop.MouseButtonTertiary})
 
@@ -20,7 +21,7 @@ func TestClickableBubble_MiddleButtonInvokesCallback(t *testing.T) {
 
 func TestClickableBubble_PrimaryButtonIgnored(t *testing.T) {
 	calls := 0
-	cb := newClickableBubble(widget.NewLabel("hi"), func() { calls++ })
+	cb := newClickableBubble(widget.NewLabel("hi"), func() { calls++ }, nil)
 
 	cb.MouseDown(&desktop.MouseEvent{Button: desktop.MouseButtonPrimary})
 	cb.MouseDown(&desktop.MouseEvent{Button: desktop.MouseButtonSecondary})
@@ -31,20 +32,38 @@ func TestClickableBubble_PrimaryButtonIgnored(t *testing.T) {
 }
 
 func TestClickableBubble_NilCallbackSafe(t *testing.T) {
-	cb := newClickableBubble(widget.NewLabel("hi"), nil)
+	cb := newClickableBubble(widget.NewLabel("hi"), nil, nil)
 	// Must not panic.
 	cb.MouseDown(&desktop.MouseEvent{Button: desktop.MouseButtonTertiary})
+	cb.DoubleTapped(nil)
 }
 
 func TestClickableBubble_NilEventSafe(t *testing.T) {
 	calls := 0
-	cb := newClickableBubble(widget.NewLabel("hi"), func() { calls++ })
+	cb := newClickableBubble(widget.NewLabel("hi"), func() { calls++ }, nil)
 	cb.MouseDown(nil)
 	if calls != 0 {
 		t.Fatalf("nil event must not invoke callback")
 	}
 }
 
-// Compile-time check that clickableBubble satisfies the Mouseable
-// interface — protects against accidental signature drift.
-var _ desktop.Mouseable = (*clickableBubble)(nil)
+func TestClickableBubble_DoubleTapInvokesReplyCallback(t *testing.T) {
+	calls := 0
+	cb := newClickableBubble(widget.NewLabel("hi"), nil, func() { calls++ })
+
+	cb.DoubleTapped(nil)
+
+	if calls != 1 {
+		t.Fatalf("double tap did not invoke reply callback exactly once, got %d", calls)
+	}
+}
+
+// Compile-time checks that clickableBubble satisfies every input
+// interface we rely on — protects against accidental signature drift
+// and against Fyne's hit-test silently dropping events because the
+// "deepest match" widget didn't implement the right interface.
+var (
+	_ desktop.Mouseable    = (*clickableBubble)(nil)
+	_ fyne.Tappable        = (*clickableBubble)(nil)
+	_ fyne.DoubleTappable  = (*clickableBubble)(nil)
+)
