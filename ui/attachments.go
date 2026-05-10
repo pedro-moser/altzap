@@ -387,7 +387,22 @@ func (cv *ChatView) StopRecordingIfActive() {
 // preview row stacked above the [attach] [entry] [mic] [send] row. Kept
 // here so chat_view.go stays focused on layout.
 func (cv *ChatView) inputBarBuild() fyne.CanvasObject {
-	cv.messageInput = widget.NewEntry()
+	// pasteAwareEntry intercepts Ctrl+V: if the system clipboard holds an
+	// image (Pedro's typical "tirei um print, vou colar" flow), the
+	// confirm-and-send dialog opens immediately. Plain text in the
+	// clipboard falls through to the default Entry paste behavior.
+	cv.messageInput = newPasteAwareEntry(nil, func(path string) {
+		if cv.currentChatJID == "" {
+			_ = os.Remove(path)
+			return
+		}
+		jid, err := types.ParseJID(cv.currentChatJID)
+		if err != nil {
+			_ = os.Remove(path)
+			return
+		}
+		cv.confirmAndSendImage(jid, path)
+	})
 	cv.messageInput.PlaceHolder = "Type a message"
 	cv.messageInput.OnSubmitted = func(string) { cv.sendMessage() }
 
