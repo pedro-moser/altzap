@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 
 	"altzap/client"
 	"altzap/ui"
@@ -18,10 +19,40 @@ import (
 )
 
 func main() {
+	// Single-instance lock: if another AltZap is already running, send it
+	// a "show" signal and exit so launcher invocations (rofi, dock, etc.)
+	// raise the existing window instead of spawning a duplicate process.
+	// The window slot is filled in below; until then a "show" arriving in
+	// the boot window is benignly dropped (boot is sub-second; users don't
+	// re-click that fast).
+	socketPath := client.SingleInstanceSocketPath()
+	var windowSlot atomic.Value // fyne.Window
+	releaseLock, isSecondary, err := client.Acquire(socketPath, func() {
+		v := windowSlot.Load()
+		if v == nil {
+			return
+		}
+		w := v.(fyne.Window)
+		fyne.Do(func() {
+			w.Show()
+			w.RequestFocus()
+		})
+	})
+	if err != nil {
+		log.Fatalf("Failed to acquire single-instance lock at %s: %v", socketPath, err)
+	}
+	if isSecondary {
+		log.Printf("single-instance: another AltZap is running at %s; signaled show and exiting", socketPath)
+		os.Exit(0)
+	}
+	log.Printf("single-instance: primary, listening on %s", socketPath)
+	defer releaseLock()
+
 	fApp := app.NewWithID("com.altzap.app")
 	fApp.Settings().SetTheme(ui.CatppuccinTheme())
 
 	window := fApp.NewWindow("AltZap")
+	windowSlot.Store(window)
 	window.SetMaster()
 	window.Resize(fyne.NewSize(1050, 700))
 	window.SetIcon(ui.AppIcon)
