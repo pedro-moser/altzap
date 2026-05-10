@@ -343,6 +343,7 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 			}
 		}
 		cv.muMessages.Unlock()
+		cv.invalidateReplyTargetIfMissing()
 
 		if upd.ChatJID == cv.currentChatJID && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
@@ -359,6 +360,7 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 			}
 		}
 		cv.muMessages.Unlock()
+		cv.invalidateReplyTargetIfMissing()
 
 		if upd.ChatJID == cv.currentChatJID && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
@@ -1823,6 +1825,22 @@ func (cv *ChatView) invalidateBubbleHeight(id string) {
 	cv.muBubbleHeights.Lock()
 	delete(cv.bubbleHeights, id)
 	cv.muBubbleHeights.Unlock()
+}
+
+// invalidateReplyTargetIfMissing exits reply mode when the highlighted
+// bubble is no longer in the chat's message list (e.g. after a delete
+// event). Called from the OnMessageDelete / OnMessageEdit callbacks
+// after the in-memory list has been mutated.
+func (cv *ChatView) invalidateReplyTargetIfMissing() {
+	if !cv.replyMode {
+		return
+	}
+	cv.muMessages.RLock()
+	present := indexOfMsg(cv.messages[cv.currentChatJID], cv.replyTargetID) >= 0
+	cv.muMessages.RUnlock()
+	if !present {
+		cv.exitReplyMode()
+	}
 }
 
 func (cv *ChatView) selectChatJID(jidStr string) {
