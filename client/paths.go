@@ -59,6 +59,22 @@ func MediaDir() string {
 	return filepath.Join(AppDataDir(), "media")
 }
 
+// AbsoluteMediaPath resolves a stored MediaPath against the current data
+// directory. Newer downloads write absolute paths via mediaPath() — those
+// pass through unchanged. Older messages persisted from the v0.1 era hold
+// "media/<chat>/<id>.<ext>" relative to the now-defunct CWD layout; we
+// rewrite those at read time by prepending AppDataDir(), so a single
+// helper covers both worlds without a destructive DB migration.
+//
+// Empty input passes through (callers commonly check `MediaPath != ""`
+// upstream; this keeps that contract intact).
+func AbsoluteMediaPath(stored string) string {
+	if stored == "" || filepath.IsAbs(stored) {
+		return stored
+	}
+	return filepath.Join(AppDataDir(), stored)
+}
+
 // AppStateDir returns the canonical state directory for AltZap (logs,
 // volatile runtime artifacts), creating it if missing. Honors
 // XDG_STATE_HOME; defaults to ~/.local/state/altzap.

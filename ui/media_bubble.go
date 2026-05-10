@@ -83,7 +83,7 @@ func imageContent(msg *Message) fyne.CanvasObject {
 	var img *canvas.Image
 	switch {
 	case msg.MediaPath != "":
-		path := client.RenderablePath(msg.MediaPath)
+		path := client.RenderablePath(client.AbsoluteMediaPath(msg.MediaPath))
 		if decoded := client.CachedImage(path); decoded != nil {
 			img = canvas.NewImageFromImage(decoded)
 		} else {
@@ -104,7 +104,7 @@ func buildImageBubble(msg *Message, window fyne.Window) fyne.CanvasObject {
 	content := imageContent(msg)
 
 	openBtn := widget.NewButtonWithIcon("Open", theme.ZoomFitIcon(), func() {
-		showImageFullscreen(msg.MediaPath, window)
+		showImageFullscreen(client.AbsoluteMediaPath(msg.MediaPath), window)
 	})
 	openBtn.Importance = widget.LowImportance
 	if msg.MediaPath == "" {
@@ -188,7 +188,7 @@ func buildVideoBubble(msg *Message, window fyne.Window) fyne.CanvasObject {
 		durTxt = fmt.Sprintf("  %d:%02d", msg.Duration/60, msg.Duration%60)
 	}
 	openBtn := widget.NewButtonWithIcon("Play"+durTxt, theme.MediaPlayIcon(), func() {
-		showVideoFullscreen(msg.MediaPath, window)
+		showVideoFullscreen(client.AbsoluteMediaPath(msg.MediaPath), window)
 	})
 	openBtn.Importance = widget.LowImportance
 	if msg.MediaPath == "" {
@@ -238,7 +238,7 @@ func buildAudioBubble(msg *Message) fyne.CanvasObject {
 			stopAudio()
 			return
 		}
-		if err := playAudio(msg.ID, msg.MediaPath, setIcon); err != nil {
+		if err := playAudio(msg.ID, client.AbsoluteMediaPath(msg.MediaPath), setIcon); err != nil {
 			// Silent fall-through; button stays in the play state. We could
 			// surface a dialog but the most common cause (no ffplay) is fixed
 			// once and then the button works for the session.
@@ -276,7 +276,7 @@ func buildDocBubble(msg *Message) fyne.CanvasObject {
 	sizeLbl.Importance = widget.LowImportance
 
 	openBtn := widget.NewButtonWithIcon("Open", theme.DocumentIcon(), func() {
-		openExternal(msg.MediaPath)
+		openExternal(client.AbsoluteMediaPath(msg.MediaPath))
 	})
 	if msg.MediaPath == "" {
 		openBtn.SetText("Downloading…")
@@ -295,7 +295,7 @@ func buildDocBubble(msg *Message) fyne.CanvasObject {
 func buildStickerBubble(msg *Message) fyne.CanvasObject {
 	const stickerSide float32 = 140
 	if msg.MediaPath != "" {
-		path := client.RenderablePath(msg.MediaPath)
+		path := client.RenderablePath(client.AbsoluteMediaPath(msg.MediaPath))
 		var img *canvas.Image
 		if decoded := client.CachedImage(path); decoded != nil {
 			img = canvas.NewImageFromImage(decoded)
