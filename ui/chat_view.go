@@ -194,6 +194,11 @@ type ChatView struct {
 
 	// Search mode: searchEscPop holds the ESC dismiss for openSearch().
 	searchEscPop func()
+
+	// priorTypedRune captures the canvas's existing OnTypedRune
+	// callback before installShortcuts overrides it, so non-reply-mode
+	// runes still reach prior handlers.
+	priorTypedRune func(rune)
 }
 
 const (
@@ -511,6 +516,9 @@ func (cv *ChatView) Build() fyne.CanvasObject {
 
 	mainSplit := container.NewHSplit(sidebarWithBg, cv.chatArea)
 	mainSplit.Offset = 0.3
+
+	cv.priorTypedRune = nil
+	cv.installShortcuts()
 
 	return mainSplit
 }
