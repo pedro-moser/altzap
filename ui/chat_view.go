@@ -1090,7 +1090,17 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 	}
 
 	bubbleInner := container.NewVBox(parts...)
-	bubble := container.NewStack(bubbleBg, container.NewPadded(bubbleInner))
+	stack := []fyne.CanvasObject{bubbleBg, container.NewPadded(bubbleInner)}
+	if cv.replyMode && msg.ID == cv.replyTargetID {
+		transparent := ctpMauve
+		transparent.A = 0
+		border := canvas.NewRectangle(transparent)
+		border.StrokeColor = ctpMauve
+		border.StrokeWidth = 2
+		border.CornerRadius = 12
+		stack = append(stack, border)
+	}
+	bubble := container.NewStack(stack...)
 
 	bubbleW := naturalContentWidth + bubblePadding
 	if bubbleW > maxBubbleWidth {
