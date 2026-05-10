@@ -114,9 +114,7 @@ func buildImageBubble(msg *Message, window fyne.Window) fyne.CanvasObject {
 
 	rows := []fyne.CanvasObject{content}
 	if msg.Text != "" {
-		caption := widget.NewLabel(msg.Text)
-		caption.Wrapping = fyne.TextWrapWord
-		rows = append(rows, caption)
+		rows = append(rows, buildMessageText(msg.Text, true))
 	}
 	rows = append(rows, container.NewHBox(openBtn))
 	return container.NewVBox(rows...)
@@ -198,9 +196,7 @@ func buildVideoBubble(msg *Message, window fyne.Window) fyne.CanvasObject {
 
 	rows := []fyne.CanvasObject{stacked}
 	if msg.Text != "" {
-		caption := widget.NewLabel(msg.Text)
-		caption.Wrapping = fyne.TextWrapWord
-		rows = append(rows, caption)
+		rows = append(rows, buildMessageText(msg.Text, true))
 	}
 	rows = append(rows, container.NewHBox(openBtn))
 	return container.NewVBox(rows...)

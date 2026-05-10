@@ -1005,14 +1005,16 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 		default:
 			// Plain text. Probe natural width without wrap so we can size the
 			// bubble to the text and only wrap when it would exceed maxBubbleWidth.
+			// buildMessageText routes URLs into a clickable RichText; falls back
+			// to a Label when there are none (cheaper for the common case).
 			if msg.Text != "" {
-				probe := widget.NewLabel(msg.Text)
+				probe := buildMessageText(msg.Text, false)
 				textNatural := probe.MinSize().Width
-				msgLabel := widget.NewLabel(msg.Text)
+				body := probe
 				if textNatural+bubblePadding > maxBubbleWidth {
-					msgLabel.Wrapping = fyne.TextWrapWord
+					body = buildMessageText(msg.Text, true)
 				}
-				parts = append(parts, msgLabel)
+				parts = append(parts, body)
 				if textNatural > naturalContentWidth {
 					naturalContentWidth = textNatural
 				}
@@ -1056,12 +1058,24 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 	bubbleInner := container.NewVBox(parts...)
 	bubble := container.NewStack(bubbleBg, container.NewPadded(bubbleInner))
 
+	// Middle-click on the bubble copies the body to the clipboard
+	// (mirrors WhatsApp Web's idiom). Skipped for deleted bubbles and
+	// when there's no text payload (pure stickers, media without
+	// caption) — nothing useful to copy.
+	var bubbleCanvas fyne.CanvasObject = bubble
+	if !msg.Deleted && msg.Text != "" && cv.window != nil {
+		body := msg.Text
+		bubbleCanvas = newClickableBubble(bubble, func() {
+			cv.window.Clipboard().SetContent(body)
+		})
+	}
+
 	bubbleW := naturalContentWidth + bubblePadding
 	if bubbleW > maxBubbleWidth {
 		bubbleW = maxBubbleWidth
 	}
 
-	bubbleRow := container.New(bubbleAlignLayout{rightAlign: msg.IsOwn, fixedWidth: bubbleW}, bubble)
+	bubbleRow := container.New(bubbleAlignLayout{rightAlign: msg.IsOwn, fixedWidth: bubbleW}, bubbleCanvas)
 
 	if dateSep != "" {
 		return container.NewVBox(buildDateChip(dateSep), bubbleRow)
