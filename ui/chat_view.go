@@ -1565,6 +1565,32 @@ func (cv *ChatView) onNewChat() {
 	cv.window.Canvas().Focus(search)
 }
 
+// selectNextChat opens the chat after the current one in the sidebar.
+// No-op when already at the last chat (no wrap) or when the sidebar
+// is empty.
+func (cv *ChatView) selectNextChat() {
+	cv.muCachedChats.RLock()
+	target := nextChatJID(cv.cachedChats, cv.currentChatJID)
+	cv.muCachedChats.RUnlock()
+	if target == "" {
+		return
+	}
+	cv.selectChatJID(target)
+}
+
+// selectPrevChat opens the chat before the current one. Symmetric to
+// selectNextChat: clamps at the first chat, opens the first chat when
+// none is currently open.
+func (cv *ChatView) selectPrevChat() {
+	cv.muCachedChats.RLock()
+	target := prevChatJID(cv.cachedChats, cv.currentChatJID)
+	cv.muCachedChats.RUnlock()
+	if target == "" {
+		return
+	}
+	cv.selectChatJID(target)
+}
+
 func (cv *ChatView) selectChatJID(jidStr string) {
 	t0 := time.Now()
 	defer logIfSlow("selectChatJID "+jidStr, t0, 100*time.Millisecond)
