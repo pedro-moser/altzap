@@ -489,6 +489,7 @@ func (cv *ChatView) Build() fyne.CanvasObject {
 	cv.searchEntry = widget.NewEntry()
 	cv.searchEntry.PlaceHolder = "Search or start new chat"
 	cv.searchEntry.OnChanged = cv.onSearch
+	cv.searchEntry.OnSubmitted = cv.confirmSearch
 
 	newChatBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), cv.onNewChat)
 	newChatBtn.Importance = widget.LowImportance
@@ -1589,6 +1590,221 @@ func (cv *ChatView) selectPrevChat() {
 		return
 	}
 	cv.selectChatJID(target)
+}
+
+// focusComposer hands keyboard focus to the message input. When reply
+// mode is active, this confirms the current target first (mirrors the
+// behavior of pressing Enter in reply mode). When search is open, it
+// closes search before focusing.
+func (cv *ChatView) focusComposer() {
+	if cv.replyMode {
+		cv.confirmReplyTarget()
+		return
+	}
+	if cv.searchEscPop != nil {
+		cv.closeSearch()
+	}
+	if cv.window != nil && cv.messageInput != nil {
+		cv.window.Canvas().Focus(cv.messageInput)
+	}
+}
+
+// openSearch focuses the sidebar search entry so typing immediately
+// filters the chat list. Cancels reply mode first if active. Pushes
+// a dismiss handler onto the ESC stack so a single Esc closes search
+// the same way it closes any other dismissible.
+func (cv *ChatView) openSearch() {
+	if cv.searchEntry == nil || cv.window == nil {
+		return
+	}
+	if cv.replyMode {
+		cv.exitReplyMode()
+	}
+	cv.window.Canvas().Focus(cv.searchEntry)
+	if cv.searchEscPop == nil {
+		cv.searchEscPop = pushEsc(cv.closeSearch)
+	}
+}
+
+// closeSearch clears the search filter, defocuses the search entry,
+// and pops its ESC-stack handler. Idempotent: safe to call when
+// search isn't open (e.g. via the ESC stack dispatching multiple
+// dismissibles in sequence).
+func (cv *ChatView) closeSearch() {
+	if cv.searchEntry == nil {
+		return
+	}
+	cv.searchEntry.SetText("")
+	if cv.window != nil && cv.messageInput != nil {
+		cv.window.Canvas().Focus(cv.messageInput)
+	}
+	if cv.searchEscPop != nil {
+		cv.searchEscPop()
+		cv.searchEscPop = nil
+	}
+}
+
+// confirmSearch opens the first chat in the currently-filtered sidebar
+// list and hands focus to the composer. Wired as searchEntry.OnSubmitted
+// in Build() so pressing Enter in the search field triggers it.
+func (cv *ChatView) confirmSearch(_ string) {
+	cv.muCachedChats.RLock()
+	var first string
+	if len(cv.cachedChats) > 0 {
+		first = cv.cachedChats[0].JID.String()
+	}
+	cv.muCachedChats.RUnlock()
+	cv.closeSearch()
+	if first != "" {
+		cv.selectChatJID(first)
+	}
+	cv.focusComposer()
+}
+
+// enterReplyMode arms the reply gesture: picks the latest non-deleted
+// message in the open chat as the initial target, parks the previous
+// focus so we can restore it on cancel, and pushes an ESC dismiss.
+// No-op if the open chat has no replyable bubble.
+func (cv *ChatView) enterReplyMode() {
+	if cv.currentChatJID == "" {
+		return
+	}
+	cv.muMessages.RLock()
+	target := latestNonDeletedMessageID(cv.messages[cv.currentChatJID])
+	cv.muMessages.RUnlock()
+	if target == "" {
+		return
+	}
+	if cv.replyMode {
+		return // already armed
+	}
+	cv.replyMode = true
+	cv.replyTargetID = target
+	if cv.window != nil {
+		cv.replyPrevFocused = cv.window.Canvas().Focused()
+		cv.window.Canvas().Focus(nil)
+	}
+	cv.invalidateBubbleHeight(target)
+	cv.refreshMessages()
+	cv.scrollToReplyTarget()
+	cv.replyModeEscPop = pushEsc(cv.exitReplyMode)
+}
+
+// exitReplyMode cancels reply mode without sending. Restores focus to
+// whatever held it before enterReplyMode and pops the ESC handler.
+// Idempotent so it's safe to call from multiple cancellation paths
+// (Esc stack, chat-switch, ChatView teardown).
+func (cv *ChatView) exitReplyMode() {
+	if !cv.replyMode {
+		return
+	}
+	staleTarget := cv.replyTargetID
+	cv.replyMode = false
+	cv.replyTargetID = ""
+	if cv.replyModeEscPop != nil {
+		cv.replyModeEscPop()
+		cv.replyModeEscPop = nil
+	}
+	if cv.window != nil && cv.replyPrevFocused != nil {
+		cv.window.Canvas().Focus(cv.replyPrevFocused)
+	}
+	cv.replyPrevFocused = nil
+	cv.invalidateBubbleHeight(staleTarget)
+	cv.refreshMessages()
+}
+
+// confirmReplyTarget commits the current reply target, exits reply
+// mode, and focuses the composer. Same effect as pressing Enter or
+// any printable character key while reply mode is armed.
+func (cv *ChatView) confirmReplyTarget() {
+	if !cv.replyMode {
+		return
+	}
+	targetID := cv.replyTargetID
+	cv.muMessages.RLock()
+	var target *Message
+	for _, m := range cv.messages[cv.currentChatJID] {
+		if m.ID == targetID {
+			target = m
+			break
+		}
+	}
+	cv.muMessages.RUnlock()
+	cv.exitReplyMode()
+	if target != nil {
+		cv.beginReply(target)
+	}
+	if cv.window != nil && cv.messageInput != nil {
+		cv.window.Canvas().Focus(cv.messageInput)
+	}
+}
+
+// replyTargetNext steps the reply-mode highlight to the next newer
+// non-deleted message. Clamp at the end. No-op outside reply mode.
+func (cv *ChatView) replyTargetNext() {
+	if !cv.replyMode {
+		return
+	}
+	cv.muMessages.RLock()
+	next := nextNonDeletedMessageID(cv.messages[cv.currentChatJID], cv.replyTargetID)
+	cv.muMessages.RUnlock()
+	if next == cv.replyTargetID {
+		return
+	}
+	old := cv.replyTargetID
+	cv.replyTargetID = next
+	cv.invalidateBubbleHeight(old)
+	cv.invalidateBubbleHeight(next)
+	cv.refreshMessages()
+	cv.scrollToReplyTarget()
+}
+
+// replyTargetPrev — symmetric backward step.
+func (cv *ChatView) replyTargetPrev() {
+	if !cv.replyMode {
+		return
+	}
+	cv.muMessages.RLock()
+	prev := prevNonDeletedMessageID(cv.messages[cv.currentChatJID], cv.replyTargetID)
+	cv.muMessages.RUnlock()
+	if prev == cv.replyTargetID {
+		return
+	}
+	old := cv.replyTargetID
+	cv.replyTargetID = prev
+	cv.invalidateBubbleHeight(old)
+	cv.invalidateBubbleHeight(prev)
+	cv.refreshMessages()
+	cv.scrollToReplyTarget()
+}
+
+// scrollToReplyTarget reuses scrollToMessage to bring the highlighted
+// bubble into view. No-op if the target ID isn't in the current chat
+// (defensive — shouldn't happen but the message list is mutable).
+func (cv *ChatView) scrollToReplyTarget() {
+	if cv.replyTargetID == "" {
+		return
+	}
+	cv.muMessages.RLock()
+	idx := indexOfMsg(cv.messages[cv.currentChatJID], cv.replyTargetID)
+	cv.muMessages.RUnlock()
+	if idx < 0 {
+		return
+	}
+	cv.scrollToMessage(idx)
+}
+
+// invalidateBubbleHeight drops the cached MinSize.Height for one
+// message so the next render measures the bubble fresh. Needed because
+// the reply-target border adds a couple of pixels and we don't want a
+// stale height pinning the row at its pre-highlight size.
+func (cv *ChatView) invalidateBubbleHeight(id string) {
+	if id == "" {
+		return
+	}
+	cv.muBubbleHeights.Lock()
+	delete(cv.bubbleHeights, id)
+	cv.muBubbleHeights.Unlock()
 }
 
 func (cv *ChatView) selectChatJID(jidStr string) {
