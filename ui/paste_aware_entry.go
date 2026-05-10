@@ -140,3 +140,17 @@ func (e *pasteAwareEntry) TypedShortcut(s fyne.Shortcut) {
 	}
 	e.Entry.TypedShortcut(s)
 }
+
+// TypedKey routes the Escape key to the app-wide ESC stack (see
+// ui/esc.go) before delegating to the embedded Entry. widget.Entry's
+// default TypedKey switch returns silently on Escape, so when the
+// composer is focused the chat view's reply-mode/search dismiss
+// handlers would otherwise never fire. Forwarding here keeps ESC
+// dismissal consistent regardless of which widget holds focus.
+func (e *pasteAwareEntry) TypedKey(key *fyne.KeyEvent) {
+	if key != nil && key.Name == fyne.KeyEscape {
+		handleEsc()
+		return
+	}
+	e.Entry.TypedKey(key)
+}

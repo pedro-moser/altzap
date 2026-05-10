@@ -99,6 +99,19 @@ func TestPasteAwareEntry_DispatchIgnoresNonCustomShortcut(t *testing.T) {
 	}
 }
 
+func TestPasteAwareEntry_EscapeForwardsToEscStack(t *testing.T) {
+	e := newPasteAwareEntry(nil, nil)
+	called := 0
+	pop := pushEsc(func() { called++ })
+	t.Cleanup(pop) // cleanup if test fails before handleEsc consumes the entry
+
+	e.TypedKey(&fyne.KeyEvent{Name: fyne.KeyEscape})
+
+	if called != 1 {
+		t.Fatalf("Escape should pop + invoke the top dismiss exactly once, got %d", called)
+	}
+}
+
 func TestPasteAwareEntry_AddCustomShortcutNilArgsAreSafe(t *testing.T) {
 	e := newPasteAwareEntry(nil, nil)
 	// Both the nil-shortcut and nil-handler paths must be silent no-ops
