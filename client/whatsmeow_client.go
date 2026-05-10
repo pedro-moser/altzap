@@ -174,6 +174,13 @@ type WhatsAppClient struct {
 	muChats          sync.RWMutex
 	groupCache       map[string]string // jid -> group name
 	muGroups         sync.RWMutex
+
+	// lidPNCache maps a LID JID string to the underlying phone-number JID
+	// it resolves to. Populated lazily by lookupPNForLID hitting whatsmeow's
+	// LIDs store; existing entries are shared across LookupName calls so we
+	// avoid a SQL round-trip per message render.
+	lidPNCache map[string]types.JID
+	muLIDs     sync.RWMutex
 }
 
 // NewWhatsAppClient creates a new WhatsApp client instance.
@@ -185,6 +192,7 @@ func NewWhatsAppClient(clientStore *sqlstore.Container, msgStore *MessageStore) 
 		messages:     make(map[string][]MessageEvent),
 		chatRegistry: make(map[string]string),
 		groupCache:   make(map[string]string),
+		lidPNCache:   make(map[string]types.JID),
 	}
 
 	device, err := clientStore.GetFirstDevice(context.Background())
@@ -1226,6 +1234,12 @@ func (w *WhatsAppClient) GetChats() ([]Chat, error) {
 
 // LookupName returns a friendly display name for a JID using the in-memory caches.
 // Falls back to the JID's user component if nothing is known.
+//
+// LID resolution: WhatsApp's privacy-preserving "@lid" JIDs do not carry
+// names per server policy (the contact row's name fields come back empty).
+// For those, resolve to the underlying phone-number JID via whatsmeow's
+// lid_map store and look that up in ContactCache. If only the phone is
+// known but no name, return the phone (still better than the opaque hash).
 func (w *WhatsAppClient) LookupName(jid types.JID) string {
 	jidStr := jid.String()
 
@@ -1252,10 +1266,51 @@ func (w *WhatsAppClient) LookupName(jid types.JID) string {
 	}
 	w.muChats.RUnlock()
 
+	if jid.Server == types.HiddenUserServer {
+		if pn, ok := w.lookupPNForLID(jid); ok {
+			w.muContacts.RLock()
+			if c, ok := w.ContactCache[pn.String()]; ok && c.Name != "" {
+				w.muContacts.RUnlock()
+				return c.Name
+			}
+			w.muContacts.RUnlock()
+			if pn.User != "" {
+				return pn.User
+			}
+		}
+	}
+
 	if jid.User != "" {
 		return jid.User
 	}
 	return jidStr
+}
+
+// lookupPNForLID resolves a LID JID to its underlying phone-number JID.
+// Hits the in-memory cache first; on miss, queries whatsmeow's lid_map
+// store and memoizes the answer. Returns ok=false when the mapping is
+// genuinely unknown (whatsmeow learns mappings over time via history
+// sync and contact-resolution events).
+func (w *WhatsAppClient) lookupPNForLID(lid types.JID) (types.JID, bool) {
+	w.muLIDs.RLock()
+	if pn, ok := w.lidPNCache[lid.String()]; ok {
+		w.muLIDs.RUnlock()
+		return pn, !pn.IsEmpty()
+	}
+	w.muLIDs.RUnlock()
+
+	if w.client == nil || w.client.Store == nil || w.client.Store.LIDs == nil {
+		return types.JID{}, false
+	}
+	pn, err := w.client.Store.LIDs.GetPNForLID(context.Background(), lid)
+	if err != nil || pn.IsEmpty() {
+		return types.JID{}, false
+	}
+
+	w.muLIDs.Lock()
+	w.lidPNCache[lid.String()] = pn
+	w.muLIDs.Unlock()
+	return pn, true
 }
 
 // PhoneForJID returns the real phone number for a chat JID, or "" if it
@@ -1322,9 +1377,11 @@ func (w *WhatsAppClient) FetchContacts() {
 		sqlStore := sqlstore.NewSQLStore(w.store, *w.client.Store.ID)
 		dbContacts, err := sqlStore.GetAllContacts(context.Background())
 		if err != nil {
+			log.Printf("FetchContacts: GetAllContacts failed: %v", err)
 			return
 		}
 
+		named := 0
 		w.muContacts.Lock()
 		for jid, info := range dbContacts {
 			displayName := ""
@@ -1334,8 +1391,12 @@ func (w *WhatsAppClient) FetchContacts() {
 				displayName = info.PushName
 			} else if info.BusinessName != "" {
 				displayName = info.BusinessName
-			} else {
-				displayName = jid.User
+			}
+			// Note: leave Name empty when the contact has no server-side
+			// name (typical of @lid entries). LookupName then knows to try
+			// LID→PN resolution instead of treating an empty name as final.
+			if displayName != "" {
+				named++
 			}
 
 			w.ContactCache[jid.String()] = Contact{
@@ -1344,6 +1405,7 @@ func (w *WhatsAppClient) FetchContacts() {
 			}
 		}
 		w.muContacts.Unlock()
+		log.Printf("FetchContacts: loaded %d contacts (%d with names)", len(dbContacts), named)
 	}()
 }
 
