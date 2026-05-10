@@ -58,3 +58,26 @@ func AppConfigDir() string {
 func MediaDir() string {
 	return filepath.Join(AppDataDir(), "media")
 }
+
+// AppStateDir returns the canonical state directory for AltZap (logs,
+// volatile runtime artifacts), creating it if missing. Honors
+// XDG_STATE_HOME; defaults to ~/.local/state/altzap.
+//
+// State is XDG-classified for files that should persist across reboots
+// but are not portable like config or precious like data — the perfect
+// fit for a rolling log file the user can grep when something looks off.
+func AppStateDir() string {
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			log.Fatalf("could not resolve home dir: %v", err)
+		}
+		base = filepath.Join(home, ".local", "state")
+	}
+	dir := filepath.Join(base, "altzap")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Fatalf("could not create state dir %q: %v", dir, err)
+	}
+	return dir
+}

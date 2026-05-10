@@ -1888,6 +1888,8 @@ func (cv *ChatView) ReloadFromDisk() {
 
 func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	jidStr := msg.Info.Chat.String()
+	log.Printf("AddMessage: chat=%s id=%s text-len=%d media=%q from-me=%v current=%s",
+		jidStr, msg.Info.ID, len(msg.Text), msg.MediaType, msg.Info.IsFromMe, cv.currentChatJID)
 
 	cv.muMessages.Lock()
 	if _, ok := cv.messages[jidStr]; !ok {
@@ -1900,6 +1902,7 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 		for _, m := range cv.messages[jidStr] {
 			if m.ID == msg.Info.ID {
 				cv.muMessages.Unlock()
+				log.Printf("AddMessage: dedup hit on id=%s — skipping", msg.Info.ID)
 				return
 			}
 		}
@@ -1950,7 +1953,11 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 
 	fyne.Do(func() {
 		if jidStr == cv.currentChatJID && cv.messageList != nil {
+			log.Printf("AddMessage: appending bubble (chat-open match) id=%s", msg.Info.ID)
 			cv.appendMessageBubble(newMsg)
+		} else {
+			log.Printf("AddMessage: bubble skipped (chat=%s vs current=%s, list=%v) id=%s",
+				jidStr, cv.currentChatJID, cv.messageList != nil, msg.Info.ID)
 		}
 	})
 	// Refresh sidebar so new messages bump chats up the list.

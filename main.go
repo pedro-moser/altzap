@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -19,6 +20,17 @@ import (
 )
 
 func main() {
+	// Persistent log: stdout/stderr go to /dev/null when launched from a
+	// Hyprland keybind, so write logs to $XDG_STATE_HOME/altzap/altzap.log
+	// in addition to stderr. Append-only; tail -f to follow live.
+	logPath := filepath.Join(client.AppStateDir(), "altzap.log")
+	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+		log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+	} else {
+		log.Printf("could not open %s for logging: %v (logs only on stderr)", logPath, err)
+	}
+	log.Printf("altzap starting (pid=%d)", os.Getpid())
+
 	// Single-instance lock: if another AltZap is already running, send it
 	// a "show" signal and exit so launcher invocations (rofi, dock, etc.)
 	// raise the existing window instead of spawning a duplicate process.
