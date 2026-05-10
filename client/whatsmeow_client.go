@@ -150,6 +150,10 @@ type Chat struct {
 	LastMessageTime int64
 	IsGroup         bool
 	AvatarURL       string
+	// Archived mirrors whatsmeow_chat_settings.archived: true when the
+	// user has archived the chat on their phone (synced via app_state /
+	// history sync). Read-only in v1 — toggling from AltZap comes later.
+	Archived bool
 }
 
 // WhatsAppClient wraps the whatsmeow client with higher-level operations
@@ -1338,6 +1342,22 @@ func (w *WhatsAppClient) PhoneForJID(jid types.JID) string {
 		return pn.User
 	}
 	return ""
+}
+
+// IsChatArchived returns true when the user has archived the given
+// chat on their phone (read from whatsmeow's chat_settings store,
+// which is populated via history/app-state sync). False on any
+// error or unknown chat — callers treat the absence of an archive
+// flag as "not archived" so the sidebar errs toward visibility.
+func (w *WhatsAppClient) IsChatArchived(jid types.JID) bool {
+	if w.client == nil || w.client.Store == nil || w.client.Store.ChatSettings == nil {
+		return false
+	}
+	settings, err := w.client.Store.ChatSettings.GetChatSettings(context.Background(), jid)
+	if err != nil {
+		return false
+	}
+	return settings.Archived
 }
 
 // FetchGroups loads all joined groups from the WhatsApp servers into the cache.

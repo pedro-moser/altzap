@@ -153,6 +153,10 @@ type ChatView struct {
 	cachedChats        []client.Chat
 	allChats           []client.Chat
 	filteredChats      []client.Chat
+	inboxChats         []client.Chat // non-archived bucket, the default sidebar view
+	archivedChats      []client.Chat // archived bucket, shown only while viewingArchived
+	viewingArchived    bool          // sidebar currently rendering the archived bucket
+	archivedHeaderBtn  *widget.Button
 	isSearching        bool
 	muCachedChats      sync.RWMutex
 	recorder           recorder
@@ -502,7 +506,18 @@ func (cv *ChatView) Build() fyne.CanvasObject {
 	newChatBtn.Importance = widget.LowImportance
 
 	searchRow := container.NewBorder(nil, nil, nil, newChatBtn, cv.searchEntry)
-	sidebarHeader := container.NewPadded(searchRow)
+
+	// Archived header button: starts hidden; updateArchivedHeader
+	// reveals it once we know how many archived chats the user has.
+	cv.archivedHeaderBtn = widget.NewButtonWithIcon("Arquivadas", theme.FolderIcon(), cv.toggleArchivedView)
+	cv.archivedHeaderBtn.Alignment = widget.ButtonAlignLeading
+	cv.archivedHeaderBtn.Importance = widget.LowImportance
+	cv.archivedHeaderBtn.Hide()
+
+	sidebarHeader := container.NewVBox(
+		container.NewPadded(searchRow),
+		cv.archivedHeaderBtn,
+	)
 
 	cv.chatList = cv.buildChatList()
 	sidebarContent := container.NewBorder(sidebarHeader, nil, nil, nil, cv.chatList)
@@ -1408,9 +1423,80 @@ func (cv *ChatView) loadChatList() {
 
 	activeChats = dedupeLIDPNTwins(activeChats, cv.waClient.PhoneForJID)
 
+	// Split into "inbox" (default view) and "archived" buckets so the
+	// sidebar can render only one at a time. Archive state mirrors the
+	// phone via whatsmeow_chat_settings — populated lazily here
+	// because it's a per-chat SQL roundtrip.
+	var inboxChats, archivedChats []client.Chat
+	for _, chat := range activeChats {
+		if cv.waClient.IsChatArchived(chat.JID) {
+			chat.Archived = true
+			archivedChats = append(archivedChats, chat)
+		} else {
+			inboxChats = append(inboxChats, chat)
+		}
+	}
+
 	cv.muCachedChats.Lock()
-	cv.cachedChats = activeChats
+	cv.inboxChats = inboxChats
+	cv.archivedChats = archivedChats
+	if cv.viewingArchived {
+		cv.cachedChats = archivedChats
+	} else {
+		cv.cachedChats = inboxChats
+	}
 	cv.muCachedChats.Unlock()
+
+	cv.updateArchivedHeader()
+}
+
+// toggleArchivedView swaps the sidebar between the inbox and the
+// archived bucket. Wired to the archivedHeaderBtn.
+func (cv *ChatView) toggleArchivedView() {
+	cv.muCachedChats.Lock()
+	cv.viewingArchived = !cv.viewingArchived
+	if cv.viewingArchived {
+		cv.cachedChats = cv.archivedChats
+	} else {
+		cv.cachedChats = cv.inboxChats
+	}
+	cv.muCachedChats.Unlock()
+	cv.updateArchivedHeader()
+	fyne.Do(func() {
+		if cv.chatList != nil {
+			cv.chatList.Refresh()
+		}
+	})
+}
+
+// updateArchivedHeader refreshes the "Arquivadas (N)" / "Voltar"
+// button label and visibility. Hidden entirely when the inbox view
+// has zero archived counterparts; while viewing the archived bucket
+// the button label flips to a back-affordance regardless of count.
+func (cv *ChatView) updateArchivedHeader() {
+	if cv.archivedHeaderBtn == nil {
+		return
+	}
+	cv.muCachedChats.RLock()
+	count := len(cv.archivedChats)
+	viewing := cv.viewingArchived
+	cv.muCachedChats.RUnlock()
+
+	fyne.Do(func() {
+		if viewing {
+			cv.archivedHeaderBtn.SetText("← Voltar pra conversas")
+			cv.archivedHeaderBtn.SetIcon(theme.NavigateBackIcon())
+			cv.archivedHeaderBtn.Show()
+			return
+		}
+		if count == 0 {
+			cv.archivedHeaderBtn.Hide()
+			return
+		}
+		cv.archivedHeaderBtn.SetText(fmt.Sprintf("Arquivadas (%d)", count))
+		cv.archivedHeaderBtn.SetIcon(theme.FolderIcon())
+		cv.archivedHeaderBtn.Show()
+	})
 }
 
 // formatLastMessagePreview turns a ChatSummary into the sidebar's preview
