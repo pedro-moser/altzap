@@ -164,6 +164,7 @@ type WhatsAppClient struct {
 	OnMessage        func(MessageEvent)
 	OnLogin          LoginCallback
 	OnHistoryUpdate  func()
+	OnConnected      func() // fires on every (re)connection — use for UI refresh
 	OnMediaReady     func(chatJID, msgID, mediaPath string) // fires when an async download finishes
 	OnReactionUpdate func(ReactionUpdate)                   // fires when a reaction is added/removed
 	OnMessageEdit    func(MessageEdit)                      // fires when a message's text was edited
@@ -221,6 +222,25 @@ func NewWhatsAppClient(clientStore *sqlstore.Container, msgStore *MessageStore) 
 			if wa.OnLogin != nil {
 				wa.OnLogin()
 			}
+		case *events.Connected:
+			log.Println("WhatsApp connected")
+			if wa.OnConnected != nil {
+				wa.OnConnected()
+			}
+		case *events.OfflineSyncCompleted:
+			log.Printf("Offline sync completed: %d events", v.Count)
+			if wa.OnHistoryUpdate != nil {
+				wa.OnHistoryUpdate()
+			}
+		case *events.KeepAliveTimeout:
+			log.Printf("KeepAlive timeout #%d (last success: %s ago)",
+				v.ErrorCount, time.Since(v.LastSuccess).Round(time.Second))
+			if v.ErrorCount >= 3 {
+				log.Println("KeepAlive: forcing reconnect")
+				wa.client.Disconnect()
+			}
+		case *events.KeepAliveRestored:
+			log.Println("KeepAlive restored")
 		case *events.LoggedOut:
 			log.Println("Logged out")
 			wa.client.Store.ID = nil
@@ -432,6 +452,12 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 	mediaType, mime, fileName, size, mw, mh, dur, thumb, caption := extractMedia(msg.Message)
 	if text == "" {
 		text = caption
+	}
+	if text == "" && mediaType == "" {
+		text = unsupportedPlaceholder(msg.Message)
+	}
+	if text == "" && mediaType == "" {
+		return
 	}
 	rid, rsenderJID, _, rtext, rmediaType := extractReply(extractContext(msg.Message))
 	rsenderName := ""
@@ -729,6 +755,49 @@ func extractText(m *waE2E.Message) string {
 	return ""
 }
 
+// unsupportedPlaceholder returns a human-readable placeholder for message
+// types the client doesn't fully render (polls, locations, contacts, etc.).
+// Returns "" when the message is a type we DO handle (text, image, video,
+// audio, document, sticker) or when it's nil/unrecognized.
+func unsupportedPlaceholder(m *waE2E.Message) string {
+	if m == nil {
+		return ""
+	}
+	switch {
+	case m.PollCreationMessage != nil:
+		q := m.PollCreationMessage.GetName()
+		if q != "" {
+			return "\U0001F4CA " + q
+		}
+		return "\U0001F4CA Poll"
+	case m.LocationMessage != nil:
+		return "\U0001F4CD Location"
+	case m.LiveLocationMessage != nil:
+		return "\U0001F4CD Live location"
+	case m.ContactMessage != nil:
+		name := m.ContactMessage.GetDisplayName()
+		if name != "" {
+			return "\U0001F464 " + name
+		}
+		return "\U0001F464 Contact"
+	case m.ContactsArrayMessage != nil:
+		return "\U0001F465 Contacts"
+	case m.EventMessage != nil:
+		return "\U0001F4C5 Event"
+	case m.GroupInviteMessage != nil:
+		return "\U0001F517 Group invite"
+	case m.ViewOnceMessage != nil:
+		return "\U0001F441 View once"
+	case m.PtvMessage != nil:
+		return "\U0001F3A5 Video message"
+	case m.OrderMessage != nil:
+		return "\U0001F6D2 Order"
+	case m.PollUpdateMessage != nil:
+		return ""
+	}
+	return ""
+}
+
 // handleHistorySync processes a batch of historical messages from the phone,
 // dedupes against what's already on disk, and persists the rest.
 func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
@@ -787,6 +856,9 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 			mediaType, mime, fileName, size, mw, mh, dur, thumb, caption := extractMedia(body)
 			if text == "" {
 				text = caption
+			}
+			if text == "" && mediaType == "" {
+				text = unsupportedPlaceholder(body)
 			}
 			if text == "" && mediaType == "" {
 				continue
