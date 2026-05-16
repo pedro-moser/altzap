@@ -180,6 +180,12 @@ func main() {
 		}
 	}
 
+	waClient.OnConnected = func() {
+		if chatView != nil {
+			chatView.ReloadFromDisk()
+		}
+	}
+
 	waClient.OnLogin = func() {
 		log.Println("Login callback triggered - transitioning to chat view")
 		chatView = ui.NewChatView(fApp, waClient, window)
@@ -189,12 +195,12 @@ func main() {
 
 	if waClient.IsLoggedIn() {
 		waClient.WaitUntilLoggedIn()
-		if err := waClient.Connect(); err != nil {
-			log.Fatalf("Failed to connect: %v", err)
-		}
 		chatView = ui.NewChatView(fApp, waClient, window)
 		wireChatView(chatView)
 		window.SetContent(chatView.Build())
+		if err := waClient.Connect(); err != nil {
+			log.Fatalf("Failed to connect: %v", err)
+		}
 	} else {
 		loginUI.Show()
 	}
