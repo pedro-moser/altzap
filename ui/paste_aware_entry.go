@@ -154,3 +154,25 @@ func (e *pasteAwareEntry) TypedKey(key *fyne.KeyEvent) {
 	}
 	e.Entry.TypedKey(key)
 }
+
+// escAwareEntry is a lightweight widget.Entry that forwards Escape to the
+// ESC stack instead of just unfocusing. Used for the sidebar search field
+// so a single ESC closes search — same pattern as pasteAwareEntry above
+// but without the clipboard / custom-shortcut machinery.
+type escAwareEntry struct {
+	widget.Entry
+}
+
+func newEscAwareEntry() *escAwareEntry {
+	e := &escAwareEntry{}
+	e.ExtendBaseWidget(e)
+	return e
+}
+
+func (e *escAwareEntry) TypedKey(key *fyne.KeyEvent) {
+	if key != nil && key.Name == fyne.KeyEscape {
+		handleEsc()
+		return
+	}
+	e.Entry.TypedKey(key)
+}

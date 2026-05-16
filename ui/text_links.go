@@ -2,12 +2,78 @@ package ui
 
 import (
 	"net/url"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"altzap/client"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/widget"
 )
+
+// emojiOnlyCount returns the number of emoji codepoints if the string
+// contains ONLY emoji (and optional whitespace/variation selectors).
+// Returns 0 if the string contains any non-emoji text. Used to detect
+// messages like "👍" or "😂❤️" that should render jumbo.
+func emojiOnlyCount(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	count := 0
+	for len(s) > 0 {
+		r, sz := utf8.DecodeRuneInString(s)
+		s = s[sz:]
+		if r == utf8.RuneError {
+			return 0
+		}
+		// Skip variation selectors (VS15/VS16) and zero-width joiners.
+		if r == 0xFE0E || r == 0xFE0F || r == 0x200D {
+			continue
+		}
+		// Skip skin-tone modifiers (U+1F3FB..U+1F3FF).
+		if r >= 0x1F3FB && r <= 0x1F3FF {
+			continue
+		}
+		// Regional indicator symbols (flags).
+		if r >= 0x1F1E6 && r <= 0x1F1FF {
+			count++
+			continue
+		}
+		// Combining enclosing keycap.
+		if r == 0x20E3 {
+			continue
+		}
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if !isEmojiRune(r) {
+			return 0
+		}
+		count++
+	}
+	return count
+}
+
+func isEmojiRune(r rune) bool {
+	return unicode.Is(unicode.So, r) ||
+		(r >= 0x1F600 && r <= 0x1F64F) || // emoticons
+		(r >= 0x1F300 && r <= 0x1F5FF) || // misc symbols & pictographs
+		(r >= 0x1F680 && r <= 0x1F6FF) || // transport & map
+		(r >= 0x1F900 && r <= 0x1F9FF) || // supplemental symbols
+		(r >= 0x1FA00 && r <= 0x1FA6F) || // chess symbols
+		(r >= 0x1FA70 && r <= 0x1FAFF) || // symbols extended-A
+		(r >= 0x2600 && r <= 0x26FF) || // misc symbols
+		(r >= 0x2700 && r <= 0x27BF) || // dingbats
+		(r >= 0x231A && r <= 0x23F3) || // misc technical
+		(r >= 0x2934 && r <= 0x2935) || // arrows
+		(r >= 0x25AA && r <= 0x25FE) || // geometric shapes
+		r == 0x200D || r == 0xFE0F || r == 0xFE0E ||
+		r == 0x2764 || r == 0x2763 || // hearts
+		r == 0x270A || r == 0x270B || r == 0x270C || r == 0x270D || // hands
+		r == 0x2122 || r == 0x00A9 || r == 0x00AE // TM, ©, ®
+}
 
 // buildMessageText returns a renderable widget for a message body, with
 // URLs auto-detected and rendered as Fyne hyperlinks (default Hyperlink

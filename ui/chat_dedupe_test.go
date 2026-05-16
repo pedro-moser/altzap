@@ -30,7 +30,7 @@ func TestDedupeLIDPNTwins_KeepsNewerTwin_LIDWins(t *testing.T) {
 		return ""
 	}
 
-	got := dedupeLIDPNTwins(chats, resolve)
+	got, _ := dedupeLIDPNTwins(chats, resolve)
 	if len(got) != 1 {
 		t.Fatalf("want 1 chat, got %d", len(got))
 	}
@@ -51,7 +51,7 @@ func TestDedupeLIDPNTwins_KeepsNewerTwin_PNWins(t *testing.T) {
 		return ""
 	}
 
-	got := dedupeLIDPNTwins(chats, resolve)
+	got, _ := dedupeLIDPNTwins(chats, resolve)
 	if len(got) != 1 {
 		t.Fatalf("want 1 chat, got %d", len(got))
 	}
@@ -67,7 +67,7 @@ func TestDedupeLIDPNTwins_LIDWithoutMappingPassesThrough(t *testing.T) {
 	}
 	resolve := func(jid types.JID) string { return "" } // no LID mapping anywhere
 
-	got := dedupeLIDPNTwins(chats, resolve)
+	got, _ := dedupeLIDPNTwins(chats, resolve)
 	if len(got) != 2 {
 		t.Fatalf("want both chats kept (no mapping = no twin), got %d", len(got))
 	}
@@ -87,7 +87,7 @@ func TestDedupeLIDPNTwins_PreservesOrder(t *testing.T) {
 		return ""
 	}
 
-	got := dedupeLIDPNTwins(chats, resolve)
+	got, _ := dedupeLIDPNTwins(chats, resolve)
 	if len(got) != 3 {
 		t.Fatalf("want 3 chats (B's PN dropped, LID kept), got %d", len(got))
 	}
@@ -107,8 +107,32 @@ func TestDedupeLIDPNTwins_GroupsAndOthersUntouched(t *testing.T) {
 	}
 	resolve := func(jid types.JID) string { return "" }
 
-	got := dedupeLIDPNTwins(chats, resolve)
+	got, _ := dedupeLIDPNTwins(chats, resolve)
 	if len(got) != 2 {
 		t.Fatalf("groups should pass through; want 2, got %d", len(got))
+	}
+}
+
+func TestDedupeLIDPNTwins_SiblingMap(t *testing.T) {
+	chats := []client.Chat{
+		{JID: mkPN("5511999"), DisplayName: "Miguel", LastMessageTime: 100},
+		{JID: mkLID("abc123"), DisplayName: "Miguel", LastMessageTime: 200},
+	}
+	resolve := func(jid types.JID) string {
+		if jid.User == "abc123" {
+			return "5511999"
+		}
+		return ""
+	}
+
+	_, siblings := dedupeLIDPNTwins(chats, resolve)
+	pnJID := mkPN("5511999").String()
+	lidJID := mkLID("abc123").String()
+
+	if sibs, ok := siblings[pnJID]; !ok || len(sibs) != 1 || sibs[0] != lidJID {
+		t.Fatalf("PN should have LID as sibling, got %v", siblings[pnJID])
+	}
+	if sibs, ok := siblings[lidJID]; !ok || len(sibs) != 1 || sibs[0] != pnJID {
+		t.Fatalf("LID should have PN as sibling, got %v", siblings[lidJID])
 	}
 }

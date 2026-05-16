@@ -114,14 +114,14 @@ func buildReactionsRow(msg *Message, cv *ChatView) fyne.CanvasObject {
 
 func buildReactionChip(emoji string, count int) fyne.CanvasObject {
 	bg := canvas.NewRectangle(color.RGBA{R: ctpSurface1.R, G: ctpSurface1.G, B: ctpSurface1.B, A: 0xc0})
-	bg.CornerRadius = 10
+	bg.CornerRadius = 12
 
 	label := emoji
 	if count > 1 {
 		label = fmt.Sprintf("%s %d", emoji, count)
 	}
 	txt := canvas.NewText(label, ctpText)
-	txt.TextSize = 13
+	txt.TextSize = 18
 	txt.TextStyle.Bold = false
 
 	padded := container.NewPadded(container.NewCenter(txt))

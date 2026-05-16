@@ -103,7 +103,7 @@ type ChatView struct {
 	fyneApp              fyne.App
 	waClient             *client.WhatsAppClient
 	window               fyne.Window
-	searchEntry          *widget.Entry
+	searchEntry          *escAwareEntry
 	chatList             *widget.List
 	messageList          *widget.List // virtualized: only visible bubbles materialized
 	messageInput         *pasteAwareEntry
@@ -157,6 +157,7 @@ type ChatView struct {
 	archivedChats      []client.Chat // archived bucket, shown only while viewingArchived
 	viewingArchived    bool          // sidebar currently rendering the archived bucket
 	archivedHeaderBtn  *widget.Button
+	siblingJIDs        map[string][]string // JID → sibling JIDs (LID/PN twins)
 	isSearching        bool
 	muCachedChats      sync.RWMutex
 	recorder           recorder
@@ -313,14 +314,21 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 				break
 			}
 		}
+		if cv.isSiblingOfCurrentChat(chatJID) {
+			for _, m := range cv.messages[cv.currentChatJID] {
+				if m.ID == msgID {
+					m.MediaPath = path
+					break
+				}
+			}
+		}
 		cv.muMessages.Unlock()
 
-		if chatJID == cv.currentChatJID && cv.messageList != nil {
+		if (chatJID == cv.currentChatJID || cv.isSiblingOfCurrentChat(chatJID)) && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
 
-	// Update in-memory message reactions when a ReactionMessage lands.
 	cv.waClient.OnReactionUpdate = func(upd client.ReactionUpdate) {
 		cv.muMessages.Lock()
 		for _, m := range cv.messages[upd.ChatJID] {
@@ -329,14 +337,21 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 				break
 			}
 		}
+		if cv.isSiblingOfCurrentChat(upd.ChatJID) {
+			for _, m := range cv.messages[cv.currentChatJID] {
+				if m.ID == upd.MessageID {
+					applyReactionUpdate(m, upd.Reactions)
+					break
+				}
+			}
+		}
 		cv.muMessages.Unlock()
 
-		if upd.ChatJID == cv.currentChatJID && cv.messageList != nil {
+		if (upd.ChatJID == cv.currentChatJID || cv.isSiblingOfCurrentChat(upd.ChatJID)) && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
 
-	// Edit: replace text in place + flag.
 	cv.waClient.OnMessageEdit = func(upd client.MessageEdit) {
 		cv.muMessages.Lock()
 		for _, m := range cv.messages[upd.ChatJID] {
@@ -346,15 +361,23 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 				break
 			}
 		}
+		if cv.isSiblingOfCurrentChat(upd.ChatJID) {
+			for _, m := range cv.messages[cv.currentChatJID] {
+				if m.ID == upd.MessageID {
+					m.Text = upd.NewText
+					m.Edited = true
+					break
+				}
+			}
+		}
 		cv.muMessages.Unlock()
 		cv.invalidateReplyTargetIfMissing()
 
-		if upd.ChatJID == cv.currentChatJID && cv.messageList != nil {
+		if (upd.ChatJID == cv.currentChatJID || cv.isSiblingOfCurrentChat(upd.ChatJID)) && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
 
-	// Delete-for-everyone: flag the message; UI swaps to placeholder.
 	cv.waClient.OnMessageDelete = func(upd client.MessageDelete) {
 		cv.muMessages.Lock()
 		for _, m := range cv.messages[upd.ChatJID] {
@@ -363,15 +386,22 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 				break
 			}
 		}
+		if cv.isSiblingOfCurrentChat(upd.ChatJID) {
+			for _, m := range cv.messages[cv.currentChatJID] {
+				if m.ID == upd.MessageID {
+					m.Deleted = true
+					break
+				}
+			}
+		}
 		cv.muMessages.Unlock()
 		cv.invalidateReplyTargetIfMissing()
 
-		if upd.ChatJID == cv.currentChatJID && cv.messageList != nil {
+		if (upd.ChatJID == cv.currentChatJID || cv.isSiblingOfCurrentChat(upd.ChatJID)) && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
 
-	// Receipts: bump status (no downgrades — handled in client).
 	cv.waClient.OnMessageStatus = func(upd client.MessageStatus) {
 		cv.muMessages.Lock()
 		for _, m := range cv.messages[upd.ChatJID] {
@@ -380,9 +410,17 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 				break
 			}
 		}
+		if cv.isSiblingOfCurrentChat(upd.ChatJID) {
+			for _, m := range cv.messages[cv.currentChatJID] {
+				if m.ID == upd.MessageID {
+					m.Status = upd.Status
+					break
+				}
+			}
+		}
 		cv.muMessages.Unlock()
 
-		if upd.ChatJID == cv.currentChatJID && cv.messageList != nil {
+		if (upd.ChatJID == cv.currentChatJID || cv.isSiblingOfCurrentChat(upd.ChatJID)) && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
@@ -401,6 +439,13 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 			cv.loadChatList()
 			cv.refreshChats()
 			time.Sleep(time.Duration(i+1) * time.Second)
+		}
+		// Long-lived periodic refresh: keeps the sidebar in sync with the DB
+		// even if event callbacks miss updates (e.g. reconnect races).
+		for {
+			time.Sleep(30 * time.Second)
+			cv.loadChatList()
+			cv.refreshChats()
 		}
 	}()
 	return cv
@@ -497,7 +542,7 @@ func sameDay(a, b time.Time) bool {
 
 func (cv *ChatView) Build() fyne.CanvasObject {
 	// --- Sidebar ---
-	cv.searchEntry = widget.NewEntry()
+	cv.searchEntry = newEscAwareEntry()
 	cv.searchEntry.PlaceHolder = "Search or start new chat"
 	cv.searchEntry.OnChanged = cv.onSearch
 	cv.searchEntry.OnSubmitted = cv.confirmSearch
@@ -773,7 +818,11 @@ func (cv *ChatView) buildChatList() *widget.List {
 	list.OnSelected = func(id widget.ListItemID) {
 		chats := cv.getChatList()
 		if id < len(chats) {
-			cv.selectChatJID(chats[id].JID.String())
+			jid := chats[id].JID.String()
+			if cv.isSearchActive() {
+				cv.closeSearch()
+			}
+			cv.selectChatJID(jid)
 		}
 	}
 	return list
@@ -1053,25 +1102,23 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 				naturalContentWidth = w
 			}
 		default:
-			// Plain text. Probe natural width without wrap so we can size the
-			// bubble to the text and only wrap when it would exceed maxBubbleWidth.
-			// buildMessageText routes URLs into a clickable RichText; falls back
-			// to a Label when there are none (cheaper for the common case).
 			if msg.Text != "" {
-				probe := buildMessageText(msg.Text, false)
-				textNatural := probe.MinSize().Width
-				body := probe
-				if textNatural+bubblePadding > maxBubbleWidth {
-					body = buildMessageText(msg.Text, true)
+				var body fyne.CanvasObject
+				var textNatural float32
+
+				if n := emojiOnlyCount(msg.Text); n > 0 && n <= 3 {
+					jumbo := canvas.NewText(msg.Text, ctpText)
+					jumbo.TextSize = 42
+					body = jumbo
+					textNatural = jumbo.MinSize().Width
+				} else {
+					// Cheap width probe: canvas.NewText is ~10x faster than
+					// widget.NewLabel because it skips the widget lifecycle.
+					probe := canvas.NewText(msg.Text, ctpText)
+					textNatural = probe.MinSize().Width
+					wrap := textNatural+bubblePadding > maxBubbleWidth
+					body = buildMessageText(msg.Text, wrap)
 				}
-				// Wrap the body text in a Mouseable+Tappable+DoubleTappable
-				// so middle-click over the text copies and double-click
-				// quotes-to-reply. Wrapping the whole bubble didn't
-				// dispatch — Fyne's hit test prefers the deepest matching
-				// widget in DFS order; siblings inside the bubble
-				// (Hyperlinks, the reaction "+" Button) match Tappable and
-				// override an outer wrapper. Wrapping just the text keeps
-				// the wrapper closer to the leaf.
 				if cv.window != nil && !msg.Deleted {
 					textCopy := msg.Text
 					replyTarget := msg
@@ -1321,6 +1368,13 @@ func (cv *ChatView) onSearch(text string) {
 		return
 	}
 
+	// Push ESC handler the first time search becomes active (covers
+	// the case where the user clicks the entry rather than using
+	// Ctrl+F, which goes through openSearch).
+	if cv.searchEscPop == nil {
+		cv.searchEscPop = pushEsc(cv.closeSearch)
+	}
+
 	queryLower := strings.ToLower(text)
 	var filtered []client.Chat
 
@@ -1421,7 +1475,11 @@ func (cv *ChatView) loadChatList() {
 		return activeChats[i].LastMessageTime > activeChats[j].LastMessageTime
 	})
 
-	activeChats = dedupeLIDPNTwins(activeChats, cv.waClient.PhoneForJID)
+	activeChats, siblings := dedupeLIDPNTwins(activeChats, cv.waClient.PhoneForJID)
+
+	cv.muCachedChats.Lock()
+	cv.siblingJIDs = siblings
+	cv.muCachedChats.Unlock()
 
 	// Split into "inbox" (default view) and "archived" buckets so the
 	// sidebar can render only one at a time. Archive state mirrors the
@@ -1544,6 +1602,21 @@ func (cv *ChatView) refreshChats() {
 			cv.chatList.Refresh()
 		}
 	})
+}
+
+func (cv *ChatView) isSiblingOfCurrentChat(jid string) bool {
+	if cv.currentChatJID == "" {
+		return false
+	}
+	cv.muCachedChats.RLock()
+	sibs := cv.siblingJIDs[cv.currentChatJID]
+	cv.muCachedChats.RUnlock()
+	for _, sib := range sibs {
+		if sib == jid {
+			return true
+		}
+	}
+	return false
 }
 
 func (cv *ChatView) onNewChat() {
@@ -1743,6 +1816,13 @@ func (cv *ChatView) openSearch() {
 	}
 }
 
+// isSearchActive returns true when the sidebar is showing filtered results.
+func (cv *ChatView) isSearchActive() bool {
+	cv.muCachedChats.RLock()
+	defer cv.muCachedChats.RUnlock()
+	return cv.isSearching
+}
+
 // closeSearch clears the search filter, defocuses the search entry,
 // and pops its ESC-stack handler. Idempotent: safe to call when
 // search isn't open (e.g. via the ESC stack dispatching multiple
@@ -1765,15 +1845,10 @@ func (cv *ChatView) closeSearch() {
 // list and hands focus to the composer. Wired as searchEntry.OnSubmitted
 // in Build() so pressing Enter in the search field triggers it.
 func (cv *ChatView) confirmSearch(_ string) {
-	cv.muCachedChats.RLock()
-	var first string
-	if len(cv.cachedChats) > 0 {
-		first = cv.cachedChats[0].JID.String()
-	}
-	cv.muCachedChats.RUnlock()
+	chats := cv.getChatList()
 	cv.closeSearch()
-	if first != "" {
-		cv.selectChatJID(first)
+	if len(chats) > 0 {
+		cv.selectChatJID(chats[0].JID.String())
 	}
 	cv.focusComposer()
 }
@@ -1974,9 +2049,7 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 	cv.resetUnread(jidStr)
 
 	cv.muMessages.Lock()
-	if _, ok := cv.messages[jidStr]; !ok {
-		cv.messages[jidStr] = cv.loadMessagesFromDisk(jidStr)
-	}
+	cv.messages[jidStr] = cv.loadMessagesFromDisk(jidStr)
 	cv.muMessages.Unlock()
 
 	title := cv.waClient.LookupName(parsed)
@@ -2039,14 +2112,43 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 func (cv *ChatView) loadMessagesFromDisk(jid string) []*Message {
 	t0 := time.Now()
 	defer func() { logIfSlow("loadMessagesFromDisk "+jid, t0, 50*time.Millisecond) }()
+
+	msgs := cv.convertRecords(jid)
+
+	// Merge messages from sibling JIDs (LID/PN twins of the same
+	// contact) so the full conversation appears in one place.
+	cv.muCachedChats.RLock()
+	sibs := cv.siblingJIDs[jid]
+	cv.muCachedChats.RUnlock()
+
+	if len(sibs) > 0 {
+		seen := make(map[string]bool, len(msgs))
+		for _, m := range msgs {
+			seen[m.ID] = true
+		}
+		for _, sib := range sibs {
+			for _, m := range cv.convertRecords(sib) {
+				if !seen[m.ID] {
+					msgs = append(msgs, m)
+					seen[m.ID] = true
+				}
+			}
+		}
+		sort.Slice(msgs, func(i, j int) bool {
+			return msgs[i].Timestamp.Before(msgs[j].Timestamp)
+		})
+	}
+
+	return msgs
+}
+
+func (cv *ChatView) convertRecords(jid string) []*Message {
 	recs, err := cv.waClient.LoadMessages(jid)
 	if err != nil {
-		return []*Message{}
+		return nil
 	}
 	msgs := make([]*Message, 0, len(recs))
 	for _, sm := range recs {
-		// Resolve sender display name. Prefer the explicit sender_name (new
-		// schema). Fallback for legacy records: parse "Name: text" prefix.
 		sender := ""
 		text := sm.Text
 		if sm.FromMe {
@@ -2319,6 +2421,11 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	log.Printf("AddMessage: chat=%s id=%s text-len=%d media=%q from-me=%v current=%s",
 		jidStr, msg.Info.ID, len(msg.Text), msg.MediaType, msg.Info.IsFromMe, cv.currentChatJID)
 
+	if msg.Text == "" && msg.MediaType == "" {
+		log.Printf("AddMessage: skip contentless message id=%s", msg.Info.ID)
+		return
+	}
+
 	cv.muMessages.Lock()
 	if _, ok := cv.messages[jidStr]; !ok {
 		cv.messages[jidStr] = cv.loadMessagesFromDisk(jidStr)
@@ -2367,11 +2474,17 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 		ReplyToMediaType:  msg.ReplyToMediaType,
 	}
 	cv.messages[jidStr] = append(cv.messages[jidStr], newMsg)
+
+	isSibling := jidStr != cv.currentChatJID && cv.isSiblingOfCurrentChat(jidStr)
+	if isSibling {
+		cv.messages[cv.currentChatJID] = append(cv.messages[cv.currentChatJID], newMsg)
+	}
 	cv.muMessages.Unlock()
 
 	// Unread + notification: only when this chat isn't on screen and the
 	// message isn't from us. Cheap heuristic — no window-focus detection.
-	if !msg.Info.IsFromMe && jidStr != cv.currentChatJID {
+	onScreen := jidStr == cv.currentChatJID || isSibling
+	if !msg.Info.IsFromMe && !onScreen {
 		cv.incrementUnread(jidStr)
 		if cv.notifyHook != nil {
 			chatName := cv.waClient.LookupName(msg.Info.Chat)
@@ -2380,7 +2493,7 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	}
 
 	fyne.Do(func() {
-		if jidStr == cv.currentChatJID && cv.messageList != nil {
+		if (jidStr == cv.currentChatJID || isSibling) && cv.messageList != nil {
 			log.Printf("AddMessage: appending bubble (chat-open match) id=%s", msg.Info.ID)
 			cv.appendMessageBubble(newMsg)
 		} else {

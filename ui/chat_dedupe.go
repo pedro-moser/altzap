@@ -18,7 +18,7 @@ import (
 // a mapping pass through untouched (we cannot detect their twin).
 //
 // Order of remaining chats matches the input order.
-func dedupeLIDPNTwins(chats []client.Chat, resolveLIDPhone func(types.JID) string) []client.Chat {
+func dedupeLIDPNTwins(chats []client.Chat, resolveLIDPhone func(types.JID) string) ([]client.Chat, map[string][]string) {
 	canonical := func(c client.Chat) string {
 		switch c.JID.Server {
 		case types.DefaultUserServer:
@@ -27,6 +27,15 @@ func dedupeLIDPNTwins(chats []client.Chat, resolveLIDPhone func(types.JID) strin
 			return resolveLIDPhone(c.JID)
 		}
 		return ""
+	}
+
+	// Group JIDs by canonical phone number.
+	phoneJIDs := make(map[string][]string) // phone → all JID strings
+	for _, c := range chats {
+		phone := canonical(c)
+		if phone != "" {
+			phoneJIDs[phone] = append(phoneJIDs[phone], c.JID.String())
+		}
 	}
 
 	// First pass: index by canonical phone, picking the index whose chat
@@ -39,6 +48,25 @@ func dedupeLIDPNTwins(chats []client.Chat, resolveLIDPhone func(types.JID) strin
 		}
 		if best, ok := winner[phone]; !ok || chats[i].LastMessageTime > chats[best].LastMessageTime {
 			winner[phone] = i
+		}
+	}
+
+	// Build sibling map: for each JID that has a twin, list the OTHER
+	// JIDs. Both winner and loser get entries so message loading can
+	// merge regardless of which JID is opened.
+	siblings := make(map[string][]string)
+	for _, jids := range phoneJIDs {
+		if len(jids) < 2 {
+			continue
+		}
+		for _, jid := range jids {
+			others := make([]string, 0, len(jids)-1)
+			for _, other := range jids {
+				if other != jid {
+					others = append(others, other)
+				}
+			}
+			siblings[jid] = others
 		}
 	}
 
@@ -56,5 +84,5 @@ func dedupeLIDPNTwins(chats []client.Chat, resolveLIDPhone func(types.JID) strin
 			out = append(out, c)
 		}
 	}
-	return out
+	return out, siblings
 }

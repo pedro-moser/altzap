@@ -63,3 +63,30 @@ func TestBuildTextWithLinks_EmptyReturnsEmpty(t *testing.T) {
 		t.Fatalf("empty input should yield no segments, got %#v", got)
 	}
 }
+
+func TestEmojiOnlyCount(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"👍", 1},
+		{"😂❤️", 2},
+		{"🇧🇷", 2},
+		{"😂😂😂", 3},
+		{"👍🏽", 1},
+		{"hello", 0},
+		{"hi 👍", 0},
+		{"👍 hello", 0},
+		{"", 0},
+		{" 😊 ", 1},
+		{"❤️", 1},
+		{"✅", 1},
+		{"😂😂😂😂", 4},
+	}
+	for _, tt := range tests {
+		got := emojiOnlyCount(tt.input)
+		if got != tt.want {
+			t.Errorf("emojiOnlyCount(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
