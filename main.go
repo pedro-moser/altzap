@@ -186,6 +186,12 @@ func main() {
 		}
 	}
 
+	waClient.OnContactsUpdated = func() {
+		if chatView != nil {
+			chatView.RefreshChatList()
+		}
+	}
+
 	waClient.OnLogin = func() {
 		log.Println("Login callback triggered - transitioning to chat view")
 		// Tear down a prior view (e.g. on relink/re-pair in the same session)

@@ -2,6 +2,7 @@ package client
 
 import (
 	"testing"
+	"time"
 
 	"go.mau.fi/whatsmeow/types"
 )
@@ -169,6 +170,27 @@ func TestResolveDisplayName_SenderAndLookupAgree(t *testing.T) {
 	}
 }
 
+func TestScheduleContactRefreshUsesContactsUpdatedCallback(t *testing.T) {
+	w := newTestClient()
+	connected := make(chan struct{}, 1)
+	contactsUpdated := make(chan struct{}, 1)
+	w.OnConnected = func() { connected <- struct{}{} }
+	w.OnContactsUpdated = func() { contactsUpdated <- struct{}{} }
+
+	w.scheduleContactRefresh()
+
+	select {
+	case <-contactsUpdated:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for contacts-updated callback")
+	}
+	select {
+	case <-connected:
+		t.Fatal("contact refresh must not fire OnConnected")
+	default:
+	}
+}
+
 func TestLookupName_ChatRegistryWhenContactCacheEmptyName(t *testing.T) {
 	w := newTestClient()
 	jid, _ := types.ParseJID("5511999999999@s.whatsapp.net")
@@ -207,6 +229,31 @@ func TestLookupName_LIDPNCacheHit(t *testing.T) {
 	if got := w.LookupName(lidJID); got != "Carla" {
 		t.Fatalf("want Carla via LID->PN, got %q", got)
 	}
+}
+
+func TestGetChats_UsesResolvedNameForDirectLIDChat(t *testing.T) {
+	w := newTestClient()
+	pnJID, _ := types.ParseJID("5511999999999@s.whatsapp.net")
+	lidJID, _ := types.ParseJID("123456789012345@lid")
+
+	w.ContactCache[pnJID.String()] = Contact{JID: pnJID, Name: "Mãe"}
+	w.lidPNCache[lidJID.String()] = pnJID
+	w.chatRegistry[lidJID.String()] = "Maria Silva"
+
+	chats, err := w.GetChats()
+	if err != nil {
+		t.Fatalf("GetChats: %v", err)
+	}
+	for _, chat := range chats {
+		if chat.JID.String() != lidJID.String() {
+			continue
+		}
+		if got := chat.DisplayName; got != "Mãe" {
+			t.Fatalf("GetChats must use resolved saved name for LID chat, got %q", got)
+		}
+		return
+	}
+	t.Fatalf("missing LID chat %s in %#v", lidJID, chats)
 }
 
 func TestLookupName_LIDFallsBackToPhoneWhenPNHasNoName(t *testing.T) {

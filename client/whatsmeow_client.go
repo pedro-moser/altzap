@@ -175,19 +175,20 @@ type Chat struct {
 
 // WhatsAppClient wraps the whatsmeow client with higher-level operations
 type WhatsAppClient struct {
-	client           *whatsmeow.Client
-	store            *sqlstore.Container
-	msgStore         *MessageStore
-	OnMessage        func(MessageEvent)
-	OnLogin          LoginCallback
-	OnHistoryUpdate  func()
-	OnConnected      func()                                 // fires on every (re)connection — use for UI refresh
-	OnMediaReady     func(chatJID, msgID, mediaPath string) // fires when an async download finishes
-	OnReactionUpdate func(ReactionUpdate)                   // fires when a reaction is added/removed
-	OnMessageEdit    func(MessageEdit)                      // fires when a message's text was edited
-	OnMessageDelete  func(MessageDelete)                    // fires on "delete for everyone"
-	OnMessageStatus  func(MessageStatus)                    // fires when delivered/read receipt arrives
-	muChannels       sync.RWMutex
+	client            *whatsmeow.Client
+	store             *sqlstore.Container
+	msgStore          *MessageStore
+	OnMessage         func(MessageEvent)
+	OnLogin           LoginCallback
+	OnHistoryUpdate   func()
+	OnConnected       func()                                 // fires on every (re)connection — use for UI refresh
+	OnMediaReady      func(chatJID, msgID, mediaPath string) // fires when an async download finishes
+	OnReactionUpdate  func(ReactionUpdate)                   // fires when a reaction is added/removed
+	OnMessageEdit     func(MessageEdit)                      // fires when a message's text was edited
+	OnMessageDelete   func(MessageDelete)                    // fires on "delete for everyone"
+	OnMessageStatus   func(MessageStatus)                    // fires when delivered/read receipt arrives
+	OnContactsUpdated func()                                 // fires after a background contact-cache refresh
+	muChannels        sync.RWMutex
 	// ContactCache holds *saved* address-book names (full/first only),
 	// owned exclusively by FetchContacts — safe to replace wholesale.
 	// pushNameCache holds network-provided display names (push/business),
@@ -1294,11 +1295,14 @@ func (w *WhatsAppClient) sendAudio(jid types.JID, path string, voice bool) (Save
 
 // GetChats returns the list of active chats from memory cache
 func (w *WhatsAppClient) GetChats() ([]Chat, error) {
-	var chats []Chat
-	seen := make(map[string]bool)
+	type chatCandidate struct {
+		jid      types.JID
+		fallback string
+		isGroup  bool
+	}
 
-	w.muContacts.RLock()
-	defer w.muContacts.RUnlock()
+	var candidates []chatCandidate
+	seen := make(map[string]bool)
 
 	// Priority 1: chats with messages in this session
 	w.muChats.RLock()
@@ -1306,27 +1310,19 @@ func (w *WhatsAppClient) GetChats() ([]Chat, error) {
 		if seen[jidStr] {
 			continue
 		}
-		jid, _ := types.ParseJID(jidStr)
+		jid, err := types.ParseJID(jidStr)
+		if err != nil {
+			continue
+		}
 		if isStatusJID(jid) {
 			continue
 		}
 		seen[jidStr] = true
 
-		displayName := name
-		if jid.Server == types.GroupServer {
-			w.muGroups.RLock()
-			if gn, ok := w.groupCache[jidStr]; ok && gn != "" {
-				displayName = gn
-			}
-			w.muGroups.RUnlock()
-		} else if c, ok := w.ContactCache[jidStr]; ok && c.Name != "" {
-			displayName = c.Name
-		}
-
-		chats = append(chats, Chat{
-			JID:         jid,
-			DisplayName: displayName,
-			IsGroup:     jid.Server == types.GroupServer,
+		candidates = append(candidates, chatCandidate{
+			jid:      jid,
+			fallback: name,
+			isGroup:  jid.Server == types.GroupServer,
 		})
 	}
 	w.muChats.RUnlock()
@@ -1337,31 +1333,51 @@ func (w *WhatsAppClient) GetChats() ([]Chat, error) {
 		if seen[jidStr] {
 			continue
 		}
+		jid, err := types.ParseJID(jidStr)
+		if err != nil {
+			continue
+		}
 		seen[jidStr] = true
-		jid, _ := types.ParseJID(jidStr)
-		chats = append(chats, Chat{
-			JID:         jid,
-			DisplayName: name,
-			IsGroup:     true,
+		candidates = append(candidates, chatCandidate{
+			jid:      jid,
+			fallback: name,
+			isGroup:  true,
 		})
 	}
 	w.muGroups.RUnlock()
 
 	// Priority 3: contact cache
+	w.muContacts.RLock()
 	for jidStr, contact := range w.ContactCache {
 		if seen[jidStr] {
 			continue
 		}
+		jid, err := types.ParseJID(jidStr)
+		if err != nil {
+			continue
+		}
 		seen[jidStr] = true
-		jid, _ := types.ParseJID(jidStr)
 
-		chats = append(chats, Chat{
-			JID:         jid,
-			DisplayName: contact.Name,
-			IsGroup:     jid.Server == types.GroupServer,
+		candidates = append(candidates, chatCandidate{
+			jid:      jid,
+			fallback: contact.Name,
+			isGroup:  jid.Server == types.GroupServer,
 		})
 	}
+	w.muContacts.RUnlock()
 
+	chats := make([]Chat, 0, len(candidates))
+	for _, candidate := range candidates {
+		displayName := candidate.fallback
+		if resolved := w.LookupName(candidate.jid); resolved != "" {
+			displayName = resolved
+		}
+		chats = append(chats, Chat{
+			JID:         candidate.jid,
+			DisplayName: displayName,
+			IsGroup:     candidate.isGroup,
+		})
+	}
 	return chats, nil
 }
 
@@ -1627,8 +1643,8 @@ func (w *WhatsAppClient) scheduleContactRefresh() {
 	}
 	w.contactRefreshTimer = time.AfterFunc(300*time.Millisecond, func() {
 		w.FetchContacts()
-		if w.OnConnected != nil {
-			w.OnConnected()
+		if w.OnContactsUpdated != nil {
+			w.OnContactsUpdated()
 		}
 	})
 }

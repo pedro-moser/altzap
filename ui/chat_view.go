@@ -381,11 +381,14 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 			}
 		}
 		cv.muMessages.Unlock()
-		cv.invalidateReplyTargetIfMissing()
 
-		if (upd.ChatJID == cur || cv.isSibling(cur, upd.ChatJID)) && cv.messageList != nil {
-			fyne.Do(func() { cv.refreshMessages() })
-		}
+		shouldRefresh := upd.ChatJID == cur || cv.isSibling(cur, upd.ChatJID)
+		fyne.Do(func() {
+			cv.invalidateReplyTargetIfMissing()
+			if shouldRefresh && cv.messageList != nil {
+				cv.refreshMessages()
+			}
+		})
 	}
 
 	cv.waClient.OnMessageDelete = func(upd client.MessageDelete) {
@@ -406,11 +409,14 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 			}
 		}
 		cv.muMessages.Unlock()
-		cv.invalidateReplyTargetIfMissing()
 
-		if (upd.ChatJID == cur || cv.isSibling(cur, upd.ChatJID)) && cv.messageList != nil {
-			fyne.Do(func() { cv.refreshMessages() })
-		}
+		shouldRefresh := upd.ChatJID == cur || cv.isSibling(cur, upd.ChatJID)
+		fyne.Do(func() {
+			cv.invalidateReplyTargetIfMissing()
+			if shouldRefresh && cv.messageList != nil {
+				cv.refreshMessages()
+			}
+		})
 	}
 
 	cv.waClient.OnMessageStatus = func(upd client.MessageStatus) {
@@ -1636,6 +1642,16 @@ func (cv *ChatView) refreshChats() {
 	})
 }
 
+// RefreshChatList reloads the sidebar chat metadata and repaints it. Safe to
+// call from background callbacks after contact/group data changes.
+func (cv *ChatView) RefreshChatList() {
+	if cv == nil {
+		return
+	}
+	cv.loadChatList()
+	cv.refreshChats()
+}
+
 // currentChat / setCurrentChat guard currentChatJID so background goroutines
 // (incoming-message + media/reaction/edit/delete/status callbacks, and the
 // send→append path) can read it without racing the UI thread's chat switch.
@@ -2079,8 +2095,9 @@ func (cv *ChatView) invalidateReplyTargetIfMissing() {
 	if !cv.replyMode {
 		return
 	}
+	current := cv.currentChat()
 	cv.muMessages.RLock()
-	present := indexOfMsg(cv.messages[cv.currentChatJID], cv.replyTargetID) >= 0
+	present := current != "" && indexOfMsg(cv.messages[current], cv.replyTargetID) >= 0
 	cv.muMessages.RUnlock()
 	if !present {
 		cv.exitReplyMode()
