@@ -149,6 +149,7 @@ type ChatView struct {
 	messages           map[string][]*Message
 	muMessages         sync.RWMutex
 	currentChatJID     string
+	muCurrentChat      sync.RWMutex // guards currentChatJID against background readers
 	currentChatIsGroup bool
 	cachedChats        []client.Chat
 	allChats           []client.Chat
@@ -305,12 +306,15 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		stopCh:        make(chan struct{}),
 	}
 
-	cv.waClient.FetchContacts()
+	// Load contacts in the background; the staggered refresh loop below repaints
+	// the sidebar with names once they arrive, so construction never blocks.
+	go cv.waClient.FetchContacts()
 
 	// Update the in-memory Message and rebuild bubbles when an async media
 	// download finishes. Runs from a download goroutine, so refresh hops
 	// to the UI thread via fyne.Do.
 	cv.waClient.OnMediaReady = func(chatJID, msgID, path string) {
+		cur := cv.currentChat()
 		cv.muMessages.Lock()
 		for _, m := range cv.messages[chatJID] {
 			if m.ID == msgID {
@@ -318,8 +322,8 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 				break
 			}
 		}
-		if cv.isSiblingOfCurrentChat(chatJID) {
-			for _, m := range cv.messages[cv.currentChatJID] {
+		if cv.isSibling(cur, chatJID) {
+			for _, m := range cv.messages[cur] {
 				if m.ID == msgID {
 					m.MediaPath = path
 					break
@@ -328,12 +332,13 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		}
 		cv.muMessages.Unlock()
 
-		if (chatJID == cv.currentChatJID || cv.isSiblingOfCurrentChat(chatJID)) && cv.messageList != nil {
+		if (chatJID == cur || cv.isSibling(cur, chatJID)) && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
 
 	cv.waClient.OnReactionUpdate = func(upd client.ReactionUpdate) {
+		cur := cv.currentChat()
 		cv.muMessages.Lock()
 		for _, m := range cv.messages[upd.ChatJID] {
 			if m.ID == upd.MessageID {
@@ -341,8 +346,8 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 				break
 			}
 		}
-		if cv.isSiblingOfCurrentChat(upd.ChatJID) {
-			for _, m := range cv.messages[cv.currentChatJID] {
+		if cv.isSibling(cur, upd.ChatJID) {
+			for _, m := range cv.messages[cur] {
 				if m.ID == upd.MessageID {
 					applyReactionUpdate(m, upd.Reactions)
 					break
@@ -351,12 +356,13 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		}
 		cv.muMessages.Unlock()
 
-		if (upd.ChatJID == cv.currentChatJID || cv.isSiblingOfCurrentChat(upd.ChatJID)) && cv.messageList != nil {
+		if (upd.ChatJID == cur || cv.isSibling(cur, upd.ChatJID)) && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
 
 	cv.waClient.OnMessageEdit = func(upd client.MessageEdit) {
+		cur := cv.currentChat()
 		cv.muMessages.Lock()
 		for _, m := range cv.messages[upd.ChatJID] {
 			if m.ID == upd.MessageID {
@@ -365,8 +371,8 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 				break
 			}
 		}
-		if cv.isSiblingOfCurrentChat(upd.ChatJID) {
-			for _, m := range cv.messages[cv.currentChatJID] {
+		if cv.isSibling(cur, upd.ChatJID) {
+			for _, m := range cv.messages[cur] {
 				if m.ID == upd.MessageID {
 					m.Text = upd.NewText
 					m.Edited = true
@@ -377,12 +383,13 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		cv.muMessages.Unlock()
 		cv.invalidateReplyTargetIfMissing()
 
-		if (upd.ChatJID == cv.currentChatJID || cv.isSiblingOfCurrentChat(upd.ChatJID)) && cv.messageList != nil {
+		if (upd.ChatJID == cur || cv.isSibling(cur, upd.ChatJID)) && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
 
 	cv.waClient.OnMessageDelete = func(upd client.MessageDelete) {
+		cur := cv.currentChat()
 		cv.muMessages.Lock()
 		for _, m := range cv.messages[upd.ChatJID] {
 			if m.ID == upd.MessageID {
@@ -390,8 +397,8 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 				break
 			}
 		}
-		if cv.isSiblingOfCurrentChat(upd.ChatJID) {
-			for _, m := range cv.messages[cv.currentChatJID] {
+		if cv.isSibling(cur, upd.ChatJID) {
+			for _, m := range cv.messages[cur] {
 				if m.ID == upd.MessageID {
 					m.Deleted = true
 					break
@@ -401,12 +408,13 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		cv.muMessages.Unlock()
 		cv.invalidateReplyTargetIfMissing()
 
-		if (upd.ChatJID == cv.currentChatJID || cv.isSiblingOfCurrentChat(upd.ChatJID)) && cv.messageList != nil {
+		if (upd.ChatJID == cur || cv.isSibling(cur, upd.ChatJID)) && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
 
 	cv.waClient.OnMessageStatus = func(upd client.MessageStatus) {
+		cur := cv.currentChat()
 		cv.muMessages.Lock()
 		for _, m := range cv.messages[upd.ChatJID] {
 			if m.ID == upd.MessageID {
@@ -414,8 +422,8 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 				break
 			}
 		}
-		if cv.isSiblingOfCurrentChat(upd.ChatJID) {
-			for _, m := range cv.messages[cv.currentChatJID] {
+		if cv.isSibling(cur, upd.ChatJID) {
+			for _, m := range cv.messages[cur] {
 				if m.ID == upd.MessageID {
 					m.Status = upd.Status
 					break
@@ -424,7 +432,7 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		}
 		cv.muMessages.Unlock()
 
-		if (upd.ChatJID == cv.currentChatJID || cv.isSiblingOfCurrentChat(upd.ChatJID)) && cv.messageList != nil {
+		if (upd.ChatJID == cur || cv.isSibling(cur, upd.ChatJID)) && cv.messageList != nil {
 			fyne.Do(func() { cv.refreshMessages() })
 		}
 	}
@@ -1628,12 +1636,30 @@ func (cv *ChatView) refreshChats() {
 	})
 }
 
-func (cv *ChatView) isSiblingOfCurrentChat(jid string) bool {
-	if cv.currentChatJID == "" {
+// currentChat / setCurrentChat guard currentChatJID so background goroutines
+// (incoming-message + media/reaction/edit/delete/status callbacks, and the
+// send→append path) can read it without racing the UI thread's chat switch.
+func (cv *ChatView) currentChat() string {
+	cv.muCurrentChat.RLock()
+	defer cv.muCurrentChat.RUnlock()
+	return cv.currentChatJID
+}
+
+func (cv *ChatView) setCurrentChat(jid string) {
+	cv.muCurrentChat.Lock()
+	cv.currentChatJID = jid
+	cv.muCurrentChat.Unlock()
+}
+
+// isSibling reports whether jid is a merged LID/PN sibling of currentJID.
+// Takes currentJID explicitly so background callers can pass a single snapshot
+// of the current chat instead of re-reading the field under a lock.
+func (cv *ChatView) isSibling(currentJID, jid string) bool {
+	if currentJID == "" {
 		return false
 	}
 	cv.muCachedChats.RLock()
-	sibs := cv.siblingJIDs[cv.currentChatJID]
+	sibs := cv.siblingJIDs[currentJID]
 	cv.muCachedChats.RUnlock()
 	for _, sib := range sibs {
 		if sib == jid {
@@ -1641,6 +1667,10 @@ func (cv *ChatView) isSiblingOfCurrentChat(jid string) bool {
 		}
 	}
 	return false
+}
+
+func (cv *ChatView) isSiblingOfCurrentChat(jid string) bool {
+	return cv.isSibling(cv.currentChat(), jid)
 }
 
 func (cv *ChatView) onNewChat() {
@@ -2067,7 +2097,7 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 		return
 	}
 
-	cv.currentChatJID = jidStr
+	cv.setCurrentChat(jidStr)
 	cv.currentChatIsGroup = parsed.Server == types.GroupServer
 	cv.renderLimit = 0 // back to the default tail size for the new chat
 	cv.resetUnread(jidStr)
@@ -2182,12 +2212,9 @@ func (cv *ChatView) messageFromRecord(sm client.SavedMessage) *Message {
 	sender := ""
 	text := sm.Text
 	if sm.FromMe {
+		// Own messages persist the caption/text verbatim — never strip a
+		// "word: " prefix here, it mangles captions like "Nota: comprar leite".
 		sender = "You"
-		if sm.SenderName == "" {
-			if idx := strings.Index(text, ": "); idx >= 0 && idx < 40 {
-				text = text[idx+2:]
-			}
-		}
 	} else if sm.SenderName != "" {
 		sender = sm.SenderName
 	} else {
@@ -2231,57 +2258,55 @@ func (cv *ChatView) messageFromRecord(sm client.SavedMessage) *Message {
 	}
 }
 
-func (cv *ChatView) appendStoredMessage(chatJID, msgID string) {
-	sm, ok, err := cv.waClient.LoadMessage(chatJID, msgID)
-	if err != nil {
-		log.Printf("appendStoredMessage load %s/%s: %v", chatJID, msgID, err)
-		return
+// appendStoredMessage renders an optimistic bubble for a just-sent message
+// straight from its persisted record — no DB read-back, so a local persistence
+// failure can't make a message that was already sent vanish from the UI.
+func (cv *ChatView) appendStoredMessage(rec client.SavedMessage) {
+	chatJID := rec.ChatJID
+	msg := cv.messageFromRecord(rec)
+	cur := cv.currentChat()
+
+	// Load history outside the lock so muMessages is never held across disk IO.
+	cv.muMessages.RLock()
+	_, loaded := cv.messages[chatJID]
+	cv.muMessages.RUnlock()
+	var preload []*Message
+	if !loaded {
+		preload = cv.loadMessagesFromDisk(chatJID)
 	}
-	if !ok {
-		log.Printf("appendStoredMessage missing %s/%s", chatJID, msgID)
-		return
-	}
-	msg := cv.messageFromRecord(sm)
 
 	cv.muMessages.Lock()
 	if _, ok := cv.messages[chatJID]; !ok {
-		cv.messages[chatJID] = cv.loadMessagesFromDisk(chatJID)
-	} else {
-		exists := false
-		for _, m := range cv.messages[chatJID] {
-			if m.ID == msgID {
-				exists = true
-				break
-			}
-		}
-		if !exists {
-			cv.messages[chatJID] = append(cv.messages[chatJID], msg)
-		}
+		// Re-check: another goroutine may have populated it while we loaded.
+		cv.messages[chatJID] = preload
 	}
-	isSibling := chatJID != cv.currentChatJID && cv.isSiblingOfCurrentChat(chatJID)
+	cv.appendUniqueLocked(chatJID, msg)
+	isSibling := chatJID != cur && cv.isSibling(cur, chatJID)
 	if isSibling {
-		exists := false
-		for _, m := range cv.messages[cv.currentChatJID] {
-			if m.ID == msgID {
-				exists = true
-				break
-			}
-		}
-		if !exists {
-			cv.messages[cv.currentChatJID] = append(cv.messages[cv.currentChatJID], msg)
-		}
+		cv.appendUniqueLocked(cur, msg)
 	}
 	cv.muMessages.Unlock()
 
 	cv.loadChatList()
 	fyne.Do(func() {
-		if (chatJID == cv.currentChatJID || isSibling) && cv.messageList != nil {
+		if (chatJID == cur || isSibling) && cv.messageList != nil {
 			cv.appendMessageBubble(msg)
 		}
 		if cv.chatList != nil {
 			cv.chatList.Refresh()
 		}
 	})
+}
+
+// appendUniqueLocked appends msg to chatJID's slice unless an entry with the
+// same ID is already present. Caller must hold muMessages.
+func (cv *ChatView) appendUniqueLocked(chatJID string, msg *Message) {
+	for _, m := range cv.messages[chatJID] {
+		if m.ID == msg.ID {
+			return
+		}
+	}
+	cv.messages[chatJID] = append(cv.messages[chatJID], msg)
 }
 
 // beginReply marks msg as the reply target for the next outgoing message
@@ -2499,8 +2524,9 @@ func (cv *ChatView) ReloadFromDisk() {
 
 func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	jidStr := msg.Info.Chat.String()
+	cur := cv.currentChat()
 	log.Printf("AddMessage: chat=%s id=%s text-len=%d media=%q from-me=%v current=%s",
-		jidStr, msg.Info.ID, len(msg.Text), msg.MediaType, msg.Info.IsFromMe, cv.currentChatJID)
+		jidStr, msg.Info.ID, len(msg.Text), msg.MediaType, msg.Info.IsFromMe, cur)
 
 	if msg.Text == "" && msg.MediaType == "" {
 		log.Printf("AddMessage: skip contentless message id=%s", msg.Info.ID)
@@ -2556,15 +2582,15 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	}
 	cv.messages[jidStr] = append(cv.messages[jidStr], newMsg)
 
-	isSibling := jidStr != cv.currentChatJID && cv.isSiblingOfCurrentChat(jidStr)
+	isSibling := jidStr != cur && cv.isSibling(cur, jidStr)
 	if isSibling {
-		cv.messages[cv.currentChatJID] = append(cv.messages[cv.currentChatJID], newMsg)
+		cv.messages[cur] = append(cv.messages[cur], newMsg)
 	}
 	cv.muMessages.Unlock()
 
 	// Unread + notification: only when this chat isn't on screen and the
 	// message isn't from us. Cheap heuristic — no window-focus detection.
-	onScreen := jidStr == cv.currentChatJID || isSibling
+	onScreen := jidStr == cur || isSibling
 	if !msg.Info.IsFromMe && !onScreen {
 		cv.incrementUnread(jidStr)
 		if cv.notifyHook != nil {
@@ -2574,12 +2600,12 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	}
 
 	fyne.Do(func() {
-		if (jidStr == cv.currentChatJID || isSibling) && cv.messageList != nil {
+		if (jidStr == cur || isSibling) && cv.messageList != nil {
 			log.Printf("AddMessage: appending bubble (chat-open match) id=%s", msg.Info.ID)
 			cv.appendMessageBubble(newMsg)
 		} else {
 			log.Printf("AddMessage: bubble skipped (chat=%s vs current=%s, list=%v) id=%s",
-				jidStr, cv.currentChatJID, cv.messageList != nil, msg.Info.ID)
+				jidStr, cur, cv.messageList != nil, msg.Info.ID)
 		}
 	})
 	// Refresh sidebar so new messages bump chats up the list.

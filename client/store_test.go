@@ -20,6 +20,19 @@ func openTestStore(t *testing.T) *MessageStore {
 	return s
 }
 
+// Item 11: persistOwn must surface a persistence failure rather than swallow
+// it, so the send path can tell whether the local record was written.
+func TestPersistOwn_ReturnsErrorWhenStoreClosed(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	w := &WhatsAppClient{msgStore: s}
+	if err := w.persistOwn(SavedMessage{ChatJID: "c@s.whatsapp.net", ID: "X", Text: "hi"}); err == nil {
+		t.Fatal("persistOwn must return the InsertBatch error when the store is closed")
+	}
+}
+
 func TestOpenMessageStore_CreatesSchema(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "messages.db")
 	s, err := OpenMessageStore(dbPath)

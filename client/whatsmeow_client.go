@@ -142,13 +142,15 @@ type Contact struct {
 	UpdateTime int64
 }
 
+// displayNameFromContactInfo returns the contact's *saved* address-book name
+// (full/first only). It excludes BusinessName and PushName (network-provided
+// names tracked in pushNameCache) and RedactedPhone (a masked phone, never a
+// name) — so nameless @lid entries stay empty and LID→PN resolution can run,
+// and a stale DB push name never outranks a fresher live one.
 func displayNameFromContactInfo(info types.ContactInfo) string {
 	for _, name := range []string{
 		info.FullName,
 		info.FirstName,
-		info.BusinessName,
-		info.PushName,
-		info.RedactedPhone,
 	} {
 		if strings.TrimSpace(name) != "" {
 			return name
@@ -186,14 +188,21 @@ type WhatsAppClient struct {
 	OnMessageDelete  func(MessageDelete)                    // fires on "delete for everyone"
 	OnMessageStatus  func(MessageStatus)                    // fires when delivered/read receipt arrives
 	muChannels       sync.RWMutex
-	ContactCache     map[string]Contact
-	muContacts       sync.RWMutex
-	muMessages       sync.Mutex
-	messages         map[string][]MessageEvent
-	chatRegistry     map[string]string // jid -> display name
-	muChats          sync.RWMutex
-	groupCache       map[string]string // jid -> group name
-	muGroups         sync.RWMutex
+	// ContactCache holds *saved* address-book names (full/first only),
+	// owned exclusively by FetchContacts — safe to replace wholesale.
+	// pushNameCache holds network-provided display names (push/business),
+	// learned from events and updatable. Both are guarded by muContacts.
+	// Splitting them lets FetchContacts rebuild saved names without wiping a
+	// push name, and lets the resolver rank saved > push.
+	ContactCache  map[string]Contact
+	pushNameCache map[string]string
+	muContacts    sync.RWMutex
+	muMessages    sync.Mutex
+	messages      map[string][]MessageEvent
+	chatRegistry  map[string]string // jid -> display name
+	muChats       sync.RWMutex
+	groupCache    map[string]string // jid -> group name
+	muGroups      sync.RWMutex
 
 	// lidPNCache maps a LID JID string to the underlying phone-number JID
 	// it resolves to. Populated lazily by lookupPNForLID hitting whatsmeow's
@@ -201,18 +210,24 @@ type WhatsAppClient struct {
 	// avoid a SQL round-trip per message render.
 	lidPNCache map[string]types.JID
 	muLIDs     sync.RWMutex
+
+	// contactRefreshTimer coalesces bursty contact events (events.Contact can
+	// fire once per contact during sync) into a single background FetchContacts.
+	muContactRefresh    sync.Mutex
+	contactRefreshTimer *time.Timer
 }
 
 // NewWhatsAppClient creates a new WhatsApp client instance.
 // msgStore is required — chat history persistence goes through it.
 func NewWhatsAppClient(clientStore *sqlstore.Container, msgStore *MessageStore) *WhatsAppClient {
 	wa := &WhatsAppClient{
-		msgStore:     msgStore,
-		ContactCache: make(map[string]Contact),
-		messages:     make(map[string][]MessageEvent),
-		chatRegistry: make(map[string]string),
-		groupCache:   make(map[string]string),
-		lidPNCache:   make(map[string]types.JID),
+		msgStore:      msgStore,
+		ContactCache:  make(map[string]Contact),
+		pushNameCache: make(map[string]string),
+		messages:      make(map[string][]MessageEvent),
+		chatRegistry:  make(map[string]string),
+		groupCache:    make(map[string]string),
+		lidPNCache:    make(map[string]types.JID),
 	}
 
 	device, err := clientStore.GetFirstDevice(context.Background())
@@ -239,18 +254,18 @@ func NewWhatsAppClient(clientStore *sqlstore.Container, msgStore *MessageStore) 
 			}
 		case *events.Connected:
 			log.Println("WhatsApp connected")
-			wa.FetchContacts()
+			wa.scheduleContactRefresh()
 			if wa.OnConnected != nil {
 				wa.OnConnected()
 			}
 		case *events.OfflineSyncCompleted:
 			log.Printf("Offline sync completed: %d events", v.Count)
-			wa.FetchContacts()
+			wa.scheduleContactRefresh()
 			if wa.OnHistoryUpdate != nil {
 				wa.OnHistoryUpdate()
 			}
 		case *events.Contact:
-			wa.FetchContacts()
+			wa.scheduleContactRefresh()
 		case *events.PushName:
 			wa.rememberPushName(v.JID, v.NewPushName)
 			if !v.JIDAlt.IsEmpty() {
@@ -492,7 +507,7 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 			rsenderName = w.LookupName(jid)
 		}
 	}
-	senderName := w.displayNameForSender(sender, msg.Info.PushName)
+	senderName := w.resolveDisplayName(sender, msg.Info.PushName)
 
 	messageEvent := MessageEvent{
 		Info:              msg.Info,
@@ -516,16 +531,7 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 		ReplyToMediaType:  rmediaType,
 	}
 
-	w.muChats.Lock()
-	chatJid := msg.Info.Chat.String()
-	if _, exists := w.chatRegistry[chatJid]; !exists {
-		pn := senderName
-		if pn == "" {
-			pn = sender.String()
-		}
-		w.chatRegistry[chatJid] = pn
-	}
-	w.muChats.Unlock()
+	w.seedChatRegistry(msg.Info.Chat.String(), msg.Info.IsGroup, senderName)
 
 	w.persistIncoming(msg, mediaType, mime, fileName, size, mw, mh, dur, thumb, text, senderName,
 		rid, rsenderJID, rsenderName, rtext, rmediaType)
@@ -897,7 +903,7 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 			pushName := wmsg.GetPushName()
 			senderName := pushName
 			if senderJID, err := types.ParseJID(sender); err == nil {
-				senderName = w.displayNameForSender(senderJID, pushName)
+				senderName = w.resolveDisplayName(senderJID, pushName)
 			}
 
 			rid, rsenderJID, _, rtext, rmediaType := extractReply(extractContext(body))
@@ -1062,19 +1068,33 @@ func (w *WhatsAppClient) SendReaction(chat, sender types.JID, msgID, emoji strin
 // persistOwn writes a freshly-sent record to the chat's JSONL. Tolerates
 // being called for the same ID twice (loadMessagesFromDisk dedupes by ID),
 // but normal flow only invokes once per send.
-func (w *WhatsAppClient) persistOwn(rec SavedMessage) {
+func (w *WhatsAppClient) persistOwn(rec SavedMessage) error {
 	if rec.ChatJID == "" {
-		return
+		return nil
 	}
 	if rec.Text == "" && rec.MediaType == "" {
-		return
+		return nil
 	}
 	if rec.Timestamp == 0 {
 		rec.Timestamp = time.Now().Unix()
 	}
 	if err := w.msgStore.InsertBatch([]SavedMessage{rec}); err != nil {
 		log.Printf("persistOwn: %v", err)
+		return err
 	}
+	return nil
+}
+
+// finishOutgoing persists an outgoing record and returns it for optimistic
+// rendering. A persistence failure is logged but NOT fatal: the message was
+// already sent remotely, and the caller renders the bubble from the returned
+// record rather than a DB read-back, so a local DB hiccup can't make a sent
+// message silently vanish from the UI.
+func (w *WhatsAppClient) finishOutgoing(rec SavedMessage) (SavedMessage, error) {
+	if err := w.persistOwn(rec); err != nil {
+		log.Printf("finishOutgoing: persist %s/%s failed (message was sent): %v", rec.ChatJID, rec.ID, err)
+	}
+	return rec, nil
 }
 
 // stashOutgoingMedia copies the source file to media/<chat>/<msg>.<ext>
@@ -1116,15 +1136,15 @@ func stashOutgoingMedia(srcPath, chatJID, msgID, mime string) string {
 // so recipients see a proper preview before downloading.
 // Persists the outgoing record locally + stashes a copy of the file under
 // media/ so the chat history survives a restart.
-func (w *WhatsAppClient) SendImage(jid types.JID, path string, caption string) (string, error) {
+func (w *WhatsAppClient) SendImage(jid types.JID, path string, caption string) (SavedMessage, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read image: %w", err)
+		return SavedMessage{}, fmt.Errorf("read image: %w", err)
 	}
 
 	resp, err := w.client.Upload(context.Background(), data, whatsmeow.MediaImage)
 	if err != nil {
-		return "", fmt.Errorf("upload image: %w", err)
+		return SavedMessage{}, fmt.Errorf("upload image: %w", err)
 	}
 
 	mime := http.DetectContentType(data)
@@ -1153,7 +1173,7 @@ func (w *WhatsAppClient) SendImage(jid types.JID, path string, caption string) (
 		ImageMessage: imageMsg,
 	})
 	if err != nil {
-		return "", err
+		return SavedMessage{}, err
 	}
 
 	rec := SavedMessage{
@@ -1172,21 +1192,20 @@ func (w *WhatsAppClient) SendImage(jid types.JID, path string, caption string) (
 	if len(thumb) > 0 {
 		rec.ThumbB64 = base64.StdEncoding.EncodeToString(thumb)
 	}
-	w.persistOwn(rec)
-	return sendResp.ID, nil
+	return w.finishOutgoing(rec)
 }
 
 // SendFile sends a file message
-func (w *WhatsAppClient) SendFile(jid types.JID, path string, filename string) (string, error) {
+func (w *WhatsAppClient) SendFile(jid types.JID, path string, filename string) (SavedMessage, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("failed to read file: %w", err)
+		return SavedMessage{}, fmt.Errorf("failed to read file: %w", err)
 	}
 
 	mime := http.DetectContentType(data)
 	resp, err := w.client.Upload(context.Background(), data, whatsmeow.MediaDocument)
 	if err != nil {
-		return "", fmt.Errorf("failed to upload file: %w", err)
+		return SavedMessage{}, fmt.Errorf("failed to upload file: %w", err)
 	}
 
 	sendResp, err := w.client.SendMessage(context.Background(), jid, &waE2E.Message{
@@ -1202,10 +1221,10 @@ func (w *WhatsAppClient) SendFile(jid types.JID, path string, filename string) (
 		},
 	})
 	if err != nil {
-		return "", err
+		return SavedMessage{}, err
 	}
 
-	w.persistOwn(SavedMessage{
+	return w.finishOutgoing(SavedMessage{
 		ID:        sendResp.ID,
 		ChatJID:   jid.String(),
 		Timestamp: sendResp.Timestamp.Unix(),
@@ -1216,28 +1235,27 @@ func (w *WhatsAppClient) SendFile(jid types.JID, path string, filename string) (
 		FileName:  filename,
 		FileSize:  uint64(len(data)),
 	})
-	return sendResp.ID, nil
 }
 
 // SendAudio sends an audio/voice message (OPUS format)
-func (w *WhatsAppClient) SendAudio(jid types.JID, path string) (string, error) {
+func (w *WhatsAppClient) SendAudio(jid types.JID, path string) (SavedMessage, error) {
 	return w.sendAudio(jid, path, false)
 }
 
 // SendVoice sends a push-to-talk voice note.
-func (w *WhatsAppClient) SendVoice(jid types.JID, path string) (string, error) {
+func (w *WhatsAppClient) SendVoice(jid types.JID, path string) (SavedMessage, error) {
 	return w.sendAudio(jid, path, true)
 }
 
-func (w *WhatsAppClient) sendAudio(jid types.JID, path string, voice bool) (string, error) {
+func (w *WhatsAppClient) sendAudio(jid types.JID, path string, voice bool) (SavedMessage, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("failed to read audio file: %w", err)
+		return SavedMessage{}, fmt.Errorf("failed to read audio file: %w", err)
 	}
 
 	resp, err := w.client.Upload(context.Background(), data, whatsmeow.MediaAudio)
 	if err != nil {
-		return "", fmt.Errorf("failed to upload audio: %w", err)
+		return SavedMessage{}, fmt.Errorf("failed to upload audio: %w", err)
 	}
 
 	mime := "audio/ogg; codecs=opus"
@@ -1259,10 +1277,10 @@ func (w *WhatsAppClient) sendAudio(jid types.JID, path string, voice bool) (stri
 		AudioMessage: audioMsg,
 	})
 	if err != nil {
-		return "", err
+		return SavedMessage{}, err
 	}
 
-	w.persistOwn(SavedMessage{
+	return w.finishOutgoing(SavedMessage{
 		ID:        sendResp.ID,
 		ChatJID:   jid.String(),
 		Timestamp: sendResp.Timestamp.Unix(),
@@ -1272,7 +1290,6 @@ func (w *WhatsAppClient) sendAudio(jid types.JID, path string, voice bool) (stri
 		Mimetype:  mime,
 		FileSize:  uint64(len(data)),
 	})
-	return sendResp.ID, nil
 }
 
 // GetChats returns the list of active chats from memory cache
@@ -1348,10 +1365,11 @@ func (w *WhatsAppClient) GetChats() ([]Chat, error) {
 	return chats, nil
 }
 
-func (w *WhatsAppClient) cachedContactName(jid types.JID) string {
-	jidStr := jid.String()
+// savedName returns the contact's saved address-book name (or "" if none),
+// bridging @lid → phone-number JID so a LID inherits the PN contact's name.
+func (w *WhatsAppClient) savedName(jid types.JID) string {
 	w.muContacts.RLock()
-	if c, ok := w.ContactCache[jidStr]; ok && c.Name != "" {
+	if c, ok := w.ContactCache[jid.String()]; ok && c.Name != "" {
 		w.muContacts.RUnlock()
 		return c.Name
 	}
@@ -1370,55 +1388,40 @@ func (w *WhatsAppClient) cachedContactName(jid types.JID) string {
 	return ""
 }
 
-func (w *WhatsAppClient) displayNameForSender(jid types.JID, pushName string) string {
-	if name := w.cachedContactName(jid); name != "" {
-		return name
+// cachedPushName returns a learned push/business name (or "" if none),
+// bridging @lid → phone-number JID like savedName.
+func (w *WhatsAppClient) cachedPushName(jid types.JID) string {
+	w.muContacts.RLock()
+	if n, ok := w.pushNameCache[jid.String()]; ok && n != "" {
+		w.muContacts.RUnlock()
+		return n
 	}
-	if strings.TrimSpace(pushName) != "" {
-		return pushName
+	w.muContacts.RUnlock()
+
+	if jid.Server == types.HiddenUserServer {
+		if pn, ok := w.lookupPNForLID(jid); ok {
+			w.muContacts.RLock()
+			if n, ok := w.pushNameCache[pn.String()]; ok && n != "" {
+				w.muContacts.RUnlock()
+				return n
+			}
+			w.muContacts.RUnlock()
+		}
 	}
-	return w.LookupName(jid)
+	return ""
 }
 
-func (w *WhatsAppClient) rememberPushName(jid types.JID, pushName string) {
-	if jid.User == "" || strings.TrimSpace(pushName) == "" {
-		return
-	}
-	w.muContacts.Lock()
-	c := w.ContactCache[jid.String()]
-	c.JID = jid
-	if c.Name == "" {
-		c.Name = pushName
-	}
-	c.UpdateTime = time.Now().Unix()
-	w.ContactCache[jid.String()] = c
-	w.muContacts.Unlock()
-}
-
-func (w *WhatsAppClient) rememberBusinessName(jid types.JID, businessName string) {
-	if jid.User == "" || strings.TrimSpace(businessName) == "" {
-		return
-	}
-	w.muContacts.Lock()
-	c := w.ContactCache[jid.String()]
-	c.JID = jid
-	if c.Name == "" {
-		c.Name = businessName
-	}
-	c.UpdateTime = time.Now().Unix()
-	w.ContactCache[jid.String()] = c
-	w.muContacts.Unlock()
-}
-
-// LookupName returns a friendly display name for a JID using the in-memory caches.
-// Falls back to the JID's user component if nothing is known.
+// resolveDisplayName is the single source of truth for turning a JID into a
+// display name. Precedence for a person/LID JID:
 //
-// LID resolution: WhatsApp's privacy-preserving "@lid" JIDs do not carry
-// names per server policy (the contact row's name fields come back empty).
-// For those, resolve to the underlying phone-number JID via whatsmeow's
-// lid_map store and look that up in ContactCache. If only the phone is
-// known but no name, return the phone (still better than the opaque hash).
-func (w *WhatsAppClient) LookupName(jid types.JID) string {
+//	saved address-book name  >  live push name  >  cached push/business name
+//	>  chat-registry fallback  >  resolved phone  >  raw JID user
+//
+// Push ranks ABOVE the chat-registry fallback on purpose: a fresh push name
+// beats a stale auto-seeded registry entry, and the sender bubble (called with
+// the live pushName) and LookupName (called with "") converge once the push
+// name is cached — which is what fixes the old two-resolvers inconsistency.
+func (w *WhatsAppClient) resolveDisplayName(jid types.JID, pushName string) string {
 	jidStr := jid.String()
 
 	if jid.Server == types.GroupServer {
@@ -1428,9 +1431,22 @@ func (w *WhatsAppClient) LookupName(jid types.JID) string {
 			return name
 		}
 		w.muGroups.RUnlock()
+		w.muChats.RLock()
+		if name, ok := w.chatRegistry[jidStr]; ok && name != "" {
+			w.muChats.RUnlock()
+			return name
+		}
+		w.muChats.RUnlock()
+		return jid.User
 	}
 
-	if name := w.cachedContactName(jid); name != "" {
+	if name := w.savedName(jid); name != "" {
+		return name
+	}
+	if strings.TrimSpace(pushName) != "" {
+		return pushName
+	}
+	if name := w.cachedPushName(jid); name != "" {
 		return name
 	}
 
@@ -1442,17 +1458,62 @@ func (w *WhatsAppClient) LookupName(jid types.JID) string {
 	w.muChats.RUnlock()
 
 	if jid.Server == types.HiddenUserServer {
-		if pn, ok := w.lookupPNForLID(jid); ok {
-			if pn.User != "" {
-				return pn.User
-			}
+		if pn, ok := w.lookupPNForLID(jid); ok && pn.User != "" {
+			return pn.User
 		}
 	}
-
 	if jid.User != "" {
 		return jid.User
 	}
 	return jidStr
+}
+
+// rememberPushName records a network-provided push name. It always updates
+// pushNameCache (so renames surface); the resolver ranks any saved name above
+// it, so this never clobbers an address-book name — and writing to a separate
+// cache means FetchContacts rebuilding ContactCache can't wipe it.
+func (w *WhatsAppClient) rememberPushName(jid types.JID, pushName string) {
+	if jid.User == "" || strings.TrimSpace(pushName) == "" {
+		return
+	}
+	w.muContacts.Lock()
+	w.pushNameCache[jid.String()] = pushName
+	w.muContacts.Unlock()
+}
+
+// rememberBusinessName records a business display name. Shares pushNameCache
+// with push names (last writer wins) — both are network-provided names that
+// rank below a saved contact name.
+func (w *WhatsAppClient) rememberBusinessName(jid types.JID, businessName string) {
+	if jid.User == "" || strings.TrimSpace(businessName) == "" {
+		return
+	}
+	w.muContacts.Lock()
+	w.pushNameCache[jid.String()] = businessName
+	w.muContacts.Unlock()
+}
+
+// seedChatRegistry records a fallback display name for a newly-seen 1:1 chat.
+// Groups are skipped on purpose: a group's name comes from groupCache, and
+// seeding a participant's name here would mislabel the whole group in the
+// sidebar until groupCache fills.
+func (w *WhatsAppClient) seedChatRegistry(chatJID string, isGroup bool, name string) {
+	if isGroup || name == "" {
+		return
+	}
+	w.muChats.Lock()
+	if _, exists := w.chatRegistry[chatJID]; !exists {
+		w.chatRegistry[chatJID] = name
+	}
+	w.muChats.Unlock()
+}
+
+// LookupName returns a friendly display name for a JID using the in-memory
+// caches, falling back to the JID's user component. It delegates to
+// resolveDisplayName with no live push name; see that function for the full
+// precedence and @lid → phone-number resolution rules.
+func (w *WhatsAppClient) LookupName(jid types.JID) string {
+	return w.resolveDisplayName(jid, "")
 }
 
 // lookupPNForLID resolves a LID JID to its underlying phone-number JID.
@@ -1552,7 +1613,29 @@ func (w *WhatsAppClient) FetchGroups() int {
 	return count
 }
 
-// FetchContacts loads all contacts from the database into the memory cache
+// scheduleContactRefresh debounces contact refreshes onto a background timer.
+// whatsmeow dispatches events synchronously on a single goroutine and emits one
+// events.Contact per contact during sync, so calling FetchContacts (a full DB
+// scan) inline would stall all event delivery. Coalescing into one background
+// scan after a short quiet period keeps the event loop responsive; once the
+// scan finishes we nudge the UI to repaint with the freshly-loaded names.
+func (w *WhatsAppClient) scheduleContactRefresh() {
+	w.muContactRefresh.Lock()
+	defer w.muContactRefresh.Unlock()
+	if w.contactRefreshTimer != nil {
+		w.contactRefreshTimer.Stop()
+	}
+	w.contactRefreshTimer = time.AfterFunc(300*time.Millisecond, func() {
+		w.FetchContacts()
+		if w.OnConnected != nil {
+			w.OnConnected()
+		}
+	})
+}
+
+// FetchContacts loads all contacts from the database into the memory cache.
+// Prefer scheduleContactRefresh from event handlers — it runs this off the
+// event-dispatch goroutine and coalesces bursts.
 func (w *WhatsAppClient) FetchContacts() {
 	if w.store == nil || w.client == nil || w.client.Store.ID == nil {
 		return
@@ -1565,25 +1648,41 @@ func (w *WhatsAppClient) FetchContacts() {
 		return
 	}
 
+	// Build the new saved-name map and any DB-known network names outside the
+	// lock to keep the critical section short.
+	saved := make(map[string]Contact, len(dbContacts))
+	dbPush := make(map[string]string)
 	named := 0
-	w.muContacts.Lock()
 	for jid, info := range dbContacts {
 		displayName := displayNameFromContactInfo(info)
-		// Note: leave Name empty when the contact has no server-side
-		// name (typical of @lid entries). LookupName then knows to try
-		// LID→PN resolution instead of treating an empty name as final.
+		// Leave Name empty for contacts with no saved name (typical of @lid):
+		// the resolver then tries LID→PN instead of treating "" as final.
 		if displayName != "" {
 			named++
 		}
+		saved[jid.String()] = Contact{JID: jid, Name: displayName, ShortName: info.FirstName}
+		net := info.BusinessName
+		if strings.TrimSpace(net) == "" {
+			net = info.PushName
+		}
+		if strings.TrimSpace(net) != "" {
+			dbPush[jid.String()] = net
+		}
+	}
 
-		w.ContactCache[jid.String()] = Contact{
-			JID:       jid,
-			Name:      displayName,
-			ShortName: info.FirstName,
+	w.muContacts.Lock()
+	// ContactCache holds only saved names and is owned solely here, so a
+	// wholesale replace is safe and can't wipe a learned push name. Seed
+	// pushNameCache from the DB only where we have no live entry yet, so a
+	// fresher event-sourced push name is never clobbered.
+	w.ContactCache = saved
+	for k, v := range dbPush {
+		if _, ok := w.pushNameCache[k]; !ok {
+			w.pushNameCache[k] = v
 		}
 	}
 	w.muContacts.Unlock()
-	log.Printf("FetchContacts: loaded %d contacts (%d with names)", len(dbContacts), named)
+	log.Printf("FetchContacts: loaded %d contacts (%d saved names)", len(dbContacts), named)
 }
 
 // LoadMessages returns persisted messages for a chat in chronological order.
@@ -1591,11 +1690,6 @@ func (w *WhatsAppClient) FetchContacts() {
 // so the UI doesn't need to import the store type directly.
 func (w *WhatsAppClient) LoadMessages(chatJID string) ([]SavedMessage, error) {
 	return w.msgStore.LoadChat(chatJID)
-}
-
-// LoadMessage returns one persisted message by chat/message ID.
-func (w *WhatsAppClient) LoadMessage(chatJID, msgID string) (SavedMessage, bool, error) {
-	return w.msgStore.LoadMessage(chatJID, msgID)
 }
 
 // ChatSummaries returns one ChatSummary per known chat, ordered by recency.

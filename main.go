@@ -188,6 +188,12 @@ func main() {
 
 	waClient.OnLogin = func() {
 		log.Println("Login callback triggered - transitioning to chat view")
+		// Tear down a prior view (e.g. on relink/re-pair in the same session)
+		// so its background refresh loop + ticker don't leak.
+		if chatView != nil {
+			chatView.Stop()
+			chatView.StopRecordingIfActive()
+		}
 		chatView = ui.NewChatView(fApp, waClient, window)
 		wireChatView(chatView)
 		loginUI.TransitionToChat(chatView)

@@ -19,6 +19,8 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"go.mau.fi/whatsmeow/types"
+
+	"altzap/client"
 )
 
 // recorder owns a single ffmpeg-based voice recording in flight.
@@ -230,25 +232,24 @@ func (cv *ChatView) confirmAndSendImage(jid types.JID, path string) {
 // sendAttachment dispatches the actual upload + appends a local optimistic
 // bubble. Caption is only honored for image; audio/document ignore it.
 func (cv *ChatView) sendAttachment(jid types.JID, path string, kind attachKind, caption string) {
-	chatJID := jid.String()
 	go func() {
 		var (
-			msgID   string
+			rec     client.SavedMessage
 			sendErr error
 		)
 		switch kind {
 		case attachImage:
-			msgID, sendErr = cv.waClient.SendImage(jid, path, caption)
+			rec, sendErr = cv.waClient.SendImage(jid, path, caption)
 		case attachAudio:
-			msgID, sendErr = cv.waClient.SendAudio(jid, path)
+			rec, sendErr = cv.waClient.SendAudio(jid, path)
 		case attachDocument:
-			msgID, sendErr = cv.waClient.SendFile(jid, path, filepath.Base(path))
+			rec, sendErr = cv.waClient.SendFile(jid, path, filepath.Base(path))
 		}
 		if sendErr != nil {
 			fyne.Do(func() { dialog.ShowError(sendErr, cv.window) })
 			return
 		}
-		cv.appendStoredMessage(chatJID, msgID)
+		cv.appendStoredMessage(rec)
 	}()
 }
 
@@ -290,13 +291,13 @@ func (cv *ChatView) onMicClicked() {
 	}
 
 	go func() {
-		msgID, err := cv.waClient.SendVoice(jid, path)
+		rec, err := cv.waClient.SendVoice(jid, path)
 		if err != nil {
 			_ = os.Remove(path)
 			fyne.Do(func() { dialog.ShowError(err, cv.window) })
 			return
 		}
-		cv.appendStoredMessage(jid.String(), msgID)
+		cv.appendStoredMessage(rec)
 		_ = os.Remove(path)
 	}()
 }
