@@ -39,16 +39,26 @@ func main() {
 	// re-click that fast).
 	socketPath := client.SingleInstanceSocketPath()
 	var windowSlot atomic.Value // fyne.Window
+	// lastFocused remembers which widget held keyboard focus when the window was
+	// hidden. Fyne drops widget focus across Hide()→Show(): the reopened window
+	// is keyboard-active (canvas shortcuts fire) but no widget receives typed
+	// runes until one is focused, so typing is dead until the user clicks. reshow
+	// restores it. Touched only on the UI thread (close intercept + fyne.Do).
+	var lastFocused fyne.Focusable
+	reshow := func(w fyne.Window) {
+		w.Show()
+		w.RequestFocus()
+		if lastFocused != nil {
+			w.Canvas().Focus(lastFocused)
+		}
+	}
 	releaseLock, isSecondary, err := client.Acquire(socketPath, func() {
 		v := windowSlot.Load()
 		if v == nil {
 			return
 		}
 		w := v.(fyne.Window)
-		fyne.Do(func() {
-			w.Show()
-			w.RequestFocus()
-		})
+		fyne.Do(func() { reshow(w) })
 	})
 	if err != nil {
 		log.Fatalf("Failed to acquire single-instance lock at %s: %v", socketPath, err)
@@ -141,15 +151,17 @@ func main() {
 	// window instead of quitting — user uses tray menu's Quit to actually exit.
 	if desk, ok := fApp.(desktop.App); ok {
 		showItem := fyne.NewMenuItem("Show", func() {
-			window.Show()
-			window.RequestFocus()
+			fyne.Do(func() { reshow(window) })
 		})
 		quitItem := fyne.NewMenuItem("Quit", func() { fApp.Quit() })
 		trayMenu := fyne.NewMenu("AltZap", showItem, fyne.NewMenuItemSeparator(), quitItem)
 		desk.SetSystemTrayMenu(trayMenu)
 		desk.SetSystemTrayIcon(ui.AppIcon)
 
-		window.SetCloseIntercept(func() { window.Hide() })
+		window.SetCloseIntercept(func() {
+			lastFocused = window.Canvas().Focused()
+			window.Hide()
+		})
 	}
 
 	// wireChatView attaches notification + tray-tooltip plumbing to the chat
