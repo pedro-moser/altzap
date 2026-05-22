@@ -155,18 +155,60 @@ func (e *pasteAwareEntry) TypedKey(key *fyne.KeyEvent) {
 	e.Entry.TypedKey(key)
 }
 
-// escAwareEntry is a lightweight widget.Entry that forwards Escape to the
-// ESC stack instead of just unfocusing. Used for the sidebar search field
-// so a single ESC closes search — same pattern as pasteAwareEntry above
-// but without the clipboard / custom-shortcut machinery.
+// escAwareEntry is a lightweight widget.Entry used for the sidebar search
+// field. It forwards Escape to the ESC stack instead of just unfocusing and
+// can mirror app-level CustomShortcuts so Ctrl+J/K/F/R/L still work while the
+// search field has keyboard focus.
 type escAwareEntry struct {
 	widget.Entry
+	customMu        sync.RWMutex
+	customShortcuts map[customShortcutKey]func()
 }
 
 func newEscAwareEntry() *escAwareEntry {
 	e := &escAwareEntry{}
 	e.ExtendBaseWidget(e)
 	return e
+}
+
+func (e *escAwareEntry) AddCustomShortcut(shortcut *desktop.CustomShortcut, handler func()) {
+	if shortcut == nil || handler == nil {
+		return
+	}
+	e.customMu.Lock()
+	defer e.customMu.Unlock()
+	if e.customShortcuts == nil {
+		e.customShortcuts = make(map[customShortcutKey]func())
+	}
+	e.customShortcuts[customShortcutKey{
+		KeyName:  shortcut.KeyName,
+		Modifier: shortcut.Modifier,
+	}] = handler
+}
+
+func (e *escAwareEntry) dispatchCustomShortcut(s fyne.Shortcut) bool {
+	cs, ok := s.(*desktop.CustomShortcut)
+	if !ok {
+		return false
+	}
+	e.customMu.RLock()
+	handler := e.customShortcuts[customShortcutKey{
+		KeyName:  cs.KeyName,
+		Modifier: cs.Modifier,
+	}]
+	e.customMu.RUnlock()
+	if handler == nil {
+		return false
+	}
+	handler()
+	return true
+}
+
+func (e *escAwareEntry) TypedShortcut(s fyne.Shortcut) {
+	if e.dispatchCustomShortcut(s) {
+		return
+	}
+	e.Entry.TypedShortcut(s)
 }
 
 func (e *escAwareEntry) TypedKey(key *fyne.KeyEvent) {

@@ -210,6 +210,7 @@ func main() {
 	// app lifecycle instead.
 	fApp.Lifecycle().SetOnStopped(func() {
 		if chatView != nil {
+			chatView.Stop()
 			chatView.StopRecordingIfActive()
 		}
 		ui.StopAudioIfActive()

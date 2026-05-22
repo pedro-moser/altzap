@@ -12,6 +12,8 @@ whatsapp.db-*
 *.db-wal
 
 # Message store (user data, JSONL)
+messages.db
+messages.db-*
 store/
 
 # Downloaded media cache (will be added in Phase 2)

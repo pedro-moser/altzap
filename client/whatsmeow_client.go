@@ -142,6 +142,21 @@ type Contact struct {
 	UpdateTime int64
 }
 
+func displayNameFromContactInfo(info types.ContactInfo) string {
+	for _, name := range []string{
+		info.FullName,
+		info.FirstName,
+		info.BusinessName,
+		info.PushName,
+		info.RedactedPhone,
+	} {
+		if strings.TrimSpace(name) != "" {
+			return name
+		}
+	}
+	return ""
+}
+
 // Chat represents an active chat
 type Chat struct {
 	JID             types.JID
@@ -164,7 +179,7 @@ type WhatsAppClient struct {
 	OnMessage        func(MessageEvent)
 	OnLogin          LoginCallback
 	OnHistoryUpdate  func()
-	OnConnected      func() // fires on every (re)connection — use for UI refresh
+	OnConnected      func()                                 // fires on every (re)connection — use for UI refresh
 	OnMediaReady     func(chatJID, msgID, mediaPath string) // fires when an async download finishes
 	OnReactionUpdate func(ReactionUpdate)                   // fires when a reaction is added/removed
 	OnMessageEdit    func(MessageEdit)                      // fires when a message's text was edited
@@ -224,14 +239,25 @@ func NewWhatsAppClient(clientStore *sqlstore.Container, msgStore *MessageStore) 
 			}
 		case *events.Connected:
 			log.Println("WhatsApp connected")
+			wa.FetchContacts()
 			if wa.OnConnected != nil {
 				wa.OnConnected()
 			}
 		case *events.OfflineSyncCompleted:
 			log.Printf("Offline sync completed: %d events", v.Count)
+			wa.FetchContacts()
 			if wa.OnHistoryUpdate != nil {
 				wa.OnHistoryUpdate()
 			}
+		case *events.Contact:
+			wa.FetchContacts()
+		case *events.PushName:
+			wa.rememberPushName(v.JID, v.NewPushName)
+			if !v.JIDAlt.IsEmpty() {
+				wa.rememberPushName(v.JIDAlt, v.NewPushName)
+			}
+		case *events.BusinessName:
+			wa.rememberBusinessName(v.JID, v.NewBusinessName)
 		case *events.KeepAliveTimeout:
 			log.Printf("KeepAlive timeout #%d (last success: %s ago)",
 				v.ErrorCount, time.Since(v.LastSuccess).Round(time.Second))
@@ -466,11 +492,12 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 			rsenderName = w.LookupName(jid)
 		}
 	}
+	senderName := w.displayNameForSender(sender, msg.Info.PushName)
 
 	messageEvent := MessageEvent{
 		Info:              msg.Info,
 		Text:              text,
-		SenderName:        msg.Info.PushName,
+		SenderName:        senderName,
 		SenderJid:         sender,
 		Timestamp:         ts.Unix(),
 		IsGroup:           msg.Info.IsGroup,
@@ -492,7 +519,7 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 	w.muChats.Lock()
 	chatJid := msg.Info.Chat.String()
 	if _, exists := w.chatRegistry[chatJid]; !exists {
-		pn := msg.Info.PushName
+		pn := senderName
 		if pn == "" {
 			pn = sender.String()
 		}
@@ -500,7 +527,7 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 	}
 	w.muChats.Unlock()
 
-	w.persistIncoming(msg, mediaType, mime, fileName, size, mw, mh, dur, thumb, text,
+	w.persistIncoming(msg, mediaType, mime, fileName, size, mw, mh, dur, thumb, text, senderName,
 		rid, rsenderJID, rsenderName, rtext, rmediaType)
 
 	if w.OnMessage != nil {
@@ -508,13 +535,7 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 	}
 
 	if sender.User != "" {
-		w.muContacts.Lock()
-		w.ContactCache[sender.String()] = Contact{
-			JID:        sender,
-			Name:       msg.Info.PushName,
-			UpdateTime: ts.Unix(),
-		}
-		w.muContacts.Unlock()
+		w.rememberPushName(sender, msg.Info.PushName)
 	}
 
 	if mediaType != "" {
@@ -702,7 +723,7 @@ func (w *WhatsAppClient) handleReaction(msg *events.Message, rxn *waE2E.Reaction
 
 // persistIncoming writes a SavedMessage record for a freshly-arrived event.
 // MediaPath stays empty until downloadAndPatch fills it asynchronously.
-func (w *WhatsAppClient) persistIncoming(msg *events.Message, mediaType, mime, fileName string, size uint64, width, height, duration uint32, thumb []byte, text, replyToID, replyToSenderJID, replyToSenderName, replyToText, replyToMediaType string) {
+func (w *WhatsAppClient) persistIncoming(msg *events.Message, mediaType, mime, fileName string, size uint64, width, height, duration uint32, thumb []byte, text, senderName, replyToID, replyToSenderJID, replyToSenderName, replyToText, replyToMediaType string) {
 	if text == "" && mediaType == "" {
 		return
 	}
@@ -710,7 +731,7 @@ func (w *WhatsAppClient) persistIncoming(msg *events.Message, mediaType, mime, f
 		ID:                msg.Info.ID,
 		ChatJID:           msg.Info.Chat.String(),
 		SenderJID:         msg.Info.Sender.String(),
-		SenderName:        msg.Info.PushName,
+		SenderName:        senderName,
 		Text:              text,
 		Timestamp:         msg.Info.Timestamp.Unix(),
 		FromMe:            msg.Info.IsFromMe,
@@ -874,6 +895,10 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 				}
 			}
 			pushName := wmsg.GetPushName()
+			senderName := pushName
+			if senderJID, err := types.ParseJID(sender); err == nil {
+				senderName = w.displayNameForSender(senderJID, pushName)
+			}
 
 			rid, rsenderJID, _, rtext, rmediaType := extractReply(extractContext(body))
 			rsenderName := ""
@@ -887,7 +912,7 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 				ID:                id,
 				ChatJID:           jidStr,
 				SenderJID:         sender,
-				SenderName:        pushName,
+				SenderName:        senderName,
 				Text:              text,
 				Timestamp:         int64(wmsg.GetMessageTimestamp()),
 				FromMe:            key.GetFromMe(),
@@ -1196,6 +1221,15 @@ func (w *WhatsAppClient) SendFile(jid types.JID, path string, filename string) (
 
 // SendAudio sends an audio/voice message (OPUS format)
 func (w *WhatsAppClient) SendAudio(jid types.JID, path string) (string, error) {
+	return w.sendAudio(jid, path, false)
+}
+
+// SendVoice sends a push-to-talk voice note.
+func (w *WhatsAppClient) SendVoice(jid types.JID, path string) (string, error) {
+	return w.sendAudio(jid, path, true)
+}
+
+func (w *WhatsAppClient) sendAudio(jid types.JID, path string, voice bool) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to read audio file: %w", err)
@@ -1207,16 +1241,22 @@ func (w *WhatsAppClient) SendAudio(jid types.JID, path string) (string, error) {
 	}
 
 	mime := "audio/ogg; codecs=opus"
+	audioMsg := &waE2E.AudioMessage{
+		URL:           &resp.URL,
+		DirectPath:    &resp.DirectPath,
+		MediaKey:      resp.MediaKey,
+		FileEncSHA256: resp.FileEncSHA256,
+		FileSHA256:    resp.FileSHA256,
+		FileLength:    proto.Uint64(uint64(len(data))),
+		Mimetype:      proto.String(mime),
+	}
+	mediaType := "audio"
+	if voice {
+		audioMsg.PTT = proto.Bool(true)
+		mediaType = "voice"
+	}
 	sendResp, err := w.client.SendMessage(context.Background(), jid, &waE2E.Message{
-		AudioMessage: &waE2E.AudioMessage{
-			URL:           &resp.URL,
-			DirectPath:    &resp.DirectPath,
-			MediaKey:      resp.MediaKey,
-			FileEncSHA256: resp.FileEncSHA256,
-			FileSHA256:    resp.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(data))),
-			Mimetype:      proto.String(mime),
-		},
+		AudioMessage: audioMsg,
 	})
 	if err != nil {
 		return "", err
@@ -1227,7 +1267,7 @@ func (w *WhatsAppClient) SendAudio(jid types.JID, path string) (string, error) {
 		ChatJID:   jid.String(),
 		Timestamp: sendResp.Timestamp.Unix(),
 		FromMe:    true,
-		MediaType: "audio",
+		MediaType: mediaType,
 		MediaPath: stashOutgoingMedia(path, jid.String(), sendResp.ID, mime),
 		Mimetype:  mime,
 		FileSize:  uint64(len(data)),
@@ -1308,6 +1348,68 @@ func (w *WhatsAppClient) GetChats() ([]Chat, error) {
 	return chats, nil
 }
 
+func (w *WhatsAppClient) cachedContactName(jid types.JID) string {
+	jidStr := jid.String()
+	w.muContacts.RLock()
+	if c, ok := w.ContactCache[jidStr]; ok && c.Name != "" {
+		w.muContacts.RUnlock()
+		return c.Name
+	}
+	w.muContacts.RUnlock()
+
+	if jid.Server == types.HiddenUserServer {
+		if pn, ok := w.lookupPNForLID(jid); ok {
+			w.muContacts.RLock()
+			if c, ok := w.ContactCache[pn.String()]; ok && c.Name != "" {
+				w.muContacts.RUnlock()
+				return c.Name
+			}
+			w.muContacts.RUnlock()
+		}
+	}
+	return ""
+}
+
+func (w *WhatsAppClient) displayNameForSender(jid types.JID, pushName string) string {
+	if name := w.cachedContactName(jid); name != "" {
+		return name
+	}
+	if strings.TrimSpace(pushName) != "" {
+		return pushName
+	}
+	return w.LookupName(jid)
+}
+
+func (w *WhatsAppClient) rememberPushName(jid types.JID, pushName string) {
+	if jid.User == "" || strings.TrimSpace(pushName) == "" {
+		return
+	}
+	w.muContacts.Lock()
+	c := w.ContactCache[jid.String()]
+	c.JID = jid
+	if c.Name == "" {
+		c.Name = pushName
+	}
+	c.UpdateTime = time.Now().Unix()
+	w.ContactCache[jid.String()] = c
+	w.muContacts.Unlock()
+}
+
+func (w *WhatsAppClient) rememberBusinessName(jid types.JID, businessName string) {
+	if jid.User == "" || strings.TrimSpace(businessName) == "" {
+		return
+	}
+	w.muContacts.Lock()
+	c := w.ContactCache[jid.String()]
+	c.JID = jid
+	if c.Name == "" {
+		c.Name = businessName
+	}
+	c.UpdateTime = time.Now().Unix()
+	w.ContactCache[jid.String()] = c
+	w.muContacts.Unlock()
+}
+
 // LookupName returns a friendly display name for a JID using the in-memory caches.
 // Falls back to the JID's user component if nothing is known.
 //
@@ -1328,12 +1430,9 @@ func (w *WhatsAppClient) LookupName(jid types.JID) string {
 		w.muGroups.RUnlock()
 	}
 
-	w.muContacts.RLock()
-	if c, ok := w.ContactCache[jidStr]; ok && c.Name != "" {
-		w.muContacts.RUnlock()
-		return c.Name
+	if name := w.cachedContactName(jid); name != "" {
+		return name
 	}
-	w.muContacts.RUnlock()
 
 	w.muChats.RLock()
 	if name, ok := w.chatRegistry[jidStr]; ok && name != "" {
@@ -1344,12 +1443,6 @@ func (w *WhatsAppClient) LookupName(jid types.JID) string {
 
 	if jid.Server == types.HiddenUserServer {
 		if pn, ok := w.lookupPNForLID(jid); ok {
-			w.muContacts.RLock()
-			if c, ok := w.ContactCache[pn.String()]; ok && c.Name != "" {
-				w.muContacts.RUnlock()
-				return c.Name
-			}
-			w.muContacts.RUnlock()
 			if pn.User != "" {
 				return pn.User
 			}
@@ -1465,40 +1558,32 @@ func (w *WhatsAppClient) FetchContacts() {
 		return
 	}
 
-	go func() {
-		sqlStore := sqlstore.NewSQLStore(w.store, *w.client.Store.ID)
-		dbContacts, err := sqlStore.GetAllContacts(context.Background())
-		if err != nil {
-			log.Printf("FetchContacts: GetAllContacts failed: %v", err)
-			return
+	sqlStore := sqlstore.NewSQLStore(w.store, *w.client.Store.ID)
+	dbContacts, err := sqlStore.GetAllContacts(context.Background())
+	if err != nil {
+		log.Printf("FetchContacts: GetAllContacts failed: %v", err)
+		return
+	}
+
+	named := 0
+	w.muContacts.Lock()
+	for jid, info := range dbContacts {
+		displayName := displayNameFromContactInfo(info)
+		// Note: leave Name empty when the contact has no server-side
+		// name (typical of @lid entries). LookupName then knows to try
+		// LID→PN resolution instead of treating an empty name as final.
+		if displayName != "" {
+			named++
 		}
 
-		named := 0
-		w.muContacts.Lock()
-		for jid, info := range dbContacts {
-			displayName := ""
-			if info.FullName != "" {
-				displayName = info.FullName
-			} else if info.PushName != "" {
-				displayName = info.PushName
-			} else if info.BusinessName != "" {
-				displayName = info.BusinessName
-			}
-			// Note: leave Name empty when the contact has no server-side
-			// name (typical of @lid entries). LookupName then knows to try
-			// LID→PN resolution instead of treating an empty name as final.
-			if displayName != "" {
-				named++
-			}
-
-			w.ContactCache[jid.String()] = Contact{
-				JID:  jid,
-				Name: displayName,
-			}
+		w.ContactCache[jid.String()] = Contact{
+			JID:       jid,
+			Name:      displayName,
+			ShortName: info.FirstName,
 		}
-		w.muContacts.Unlock()
-		log.Printf("FetchContacts: loaded %d contacts (%d with names)", len(dbContacts), named)
-	}()
+	}
+	w.muContacts.Unlock()
+	log.Printf("FetchContacts: loaded %d contacts (%d with names)", len(dbContacts), named)
 }
 
 // LoadMessages returns persisted messages for a chat in chronological order.
@@ -1506,6 +1591,11 @@ func (w *WhatsAppClient) FetchContacts() {
 // so the UI doesn't need to import the store type directly.
 func (w *WhatsAppClient) LoadMessages(chatJID string) ([]SavedMessage, error) {
 	return w.msgStore.LoadChat(chatJID)
+}
+
+// LoadMessage returns one persisted message by chat/message ID.
+func (w *WhatsAppClient) LoadMessage(chatJID, msgID string) (SavedMessage, bool, error) {
+	return w.msgStore.LoadMessage(chatJID, msgID)
 }
 
 // ChatSummaries returns one ChatSummary per known chat, ordered by recency.

@@ -99,6 +99,36 @@ func TestInsertAndLoadChat_Roundtrip(t *testing.T) {
 	}
 }
 
+func TestLoadMessage_FoundAndMissing(t *testing.T) {
+	s := openTestStore(t)
+	rec := SavedMessage{
+		ChatJID:   "chat@s.whatsapp.net",
+		ID:        "ABC123",
+		Text:      "hello",
+		Timestamp: 1700000000,
+		MediaType: "voice",
+		MediaPath: "media/chat/ABC123.ogg",
+	}
+	if err := s.Insert(rec); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	got, ok, err := s.LoadMessage(rec.ChatJID, rec.ID)
+	if err != nil {
+		t.Fatalf("LoadMessage: %v", err)
+	}
+	if !ok {
+		t.Fatal("LoadMessage should report ok=true for existing record")
+	}
+	if !reflect.DeepEqual(got, rec) {
+		t.Fatalf("roundtrip mismatch:\nwant: %+v\ngot:  %+v", rec, got)
+	}
+
+	if _, ok, err := s.LoadMessage(rec.ChatJID, "missing"); err != nil || ok {
+		t.Fatalf("missing LoadMessage: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestLoadChat_OrdersByTimestampAscending(t *testing.T) {
 	s := openTestStore(t)
 	chat := "chat@s.whatsapp.net"

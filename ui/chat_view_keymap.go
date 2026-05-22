@@ -31,12 +31,15 @@ func (cv *ChatView) installShortcuts() {
 			Modifier: fyne.KeyModifierControl,
 		}
 		canvas.AddShortcut(shortcut, func(_ fyne.Shortcut) { handler() })
-		// Mirror onto the composer so the chord still fires when the
-		// entry has focus — widget.Entry is fyne.Shortcutable and Fyne
-		// dispatches focused-widget shortcuts exclusively, silently
-		// dropping anything Entry doesn't itself recognize.
+		// Mirror onto entries so the chord still fires when an entry has
+		// focus. widget.Entry is fyne.Shortcutable and Fyne dispatches
+		// focused-widget shortcuts exclusively, silently dropping anything
+		// Entry doesn't itself recognize.
 		if cv.messageInput != nil {
 			cv.messageInput.AddCustomShortcut(shortcut, handler)
+		}
+		if cv.searchEntry != nil {
+			cv.searchEntry.AddCustomShortcut(shortcut, handler)
 		}
 	}
 

@@ -122,3 +122,24 @@ func TestPasteAwareEntry_AddCustomShortcutNilArgsAreSafe(t *testing.T) {
 		t.Fatal("nil-handler registration must not be retrievable")
 	}
 }
+
+func TestEscAwareEntry_AddCustomShortcutDispatches(t *testing.T) {
+	e := newEscAwareEntry()
+	calls := 0
+	sc := &desktop.CustomShortcut{KeyName: fyne.KeyK, Modifier: fyne.KeyModifierControl}
+	e.AddCustomShortcut(sc, func() { calls++ })
+
+	if !e.dispatchCustomShortcut(sc) {
+		t.Fatal("registered shortcut should be claimed by dispatchCustomShortcut")
+	}
+	if calls != 1 {
+		t.Fatalf("handler should fire exactly once, got %d", calls)
+	}
+}
+
+func TestEscAwareEntry_DispatchUnknownShortcutFallsThrough(t *testing.T) {
+	e := newEscAwareEntry()
+	if e.dispatchCustomShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyZ, Modifier: fyne.KeyModifierControl}) {
+		t.Fatal("unknown shortcut must fall through (return false)")
+	}
+}

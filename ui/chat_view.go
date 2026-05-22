@@ -183,6 +183,9 @@ type ChatView struct {
 	updateBubbleNS int64
 	muUpdateStats  sync.Mutex
 
+	stopCh   chan struct{}
+	stopOnce sync.Once
+
 	// Render-time limit for the open chat: 0 means default. Reset on chat
 	// switch; "Load older" bumps by renderChunk.
 	renderLimit int
@@ -299,6 +302,7 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		unread:        make(map[string]int),
 		avatarFetched: make(map[string]bool),
 		bubbleHeights: make(map[string]float32),
+		stopCh:        make(chan struct{}),
 	}
 
 	cv.waClient.FetchContacts()
@@ -438,17 +442,37 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 			}
 			cv.loadChatList()
 			cv.refreshChats()
-			time.Sleep(time.Duration(i+1) * time.Second)
+			timer := time.NewTimer(time.Duration(i+1) * time.Second)
+			select {
+			case <-timer.C:
+			case <-cv.stopCh:
+				timer.Stop()
+				return
+			}
 		}
 		// Long-lived periodic refresh: keeps the sidebar in sync with the DB
 		// even if event callbacks miss updates (e.g. reconnect races).
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
 		for {
-			time.Sleep(30 * time.Second)
-			cv.loadChatList()
-			cv.refreshChats()
+			select {
+			case <-ticker.C:
+				cv.loadChatList()
+				cv.refreshChats()
+			case <-cv.stopCh:
+				return
+			}
 		}
 	}()
 	return cv
+}
+
+// Stop tears down background loops owned by the chat view.
+func (cv *ChatView) Stop() {
+	if cv == nil {
+		return
+	}
+	cv.stopOnce.Do(func() { close(cv.stopCh) })
 }
 
 func getInitials(name string) string {
@@ -2149,58 +2173,115 @@ func (cv *ChatView) convertRecords(jid string) []*Message {
 	}
 	msgs := make([]*Message, 0, len(recs))
 	for _, sm := range recs {
-		sender := ""
-		text := sm.Text
-		if sm.FromMe {
-			sender = "You"
-			if sm.SenderName == "" {
-				if idx := strings.Index(text, ": "); idx >= 0 && idx < 40 {
-					text = text[idx+2:]
-				}
-			}
-		} else if sm.SenderName != "" {
-			sender = sm.SenderName
-		} else {
-			if idx := strings.Index(text, ": "); idx >= 0 && idx < 40 {
-				sender = text[:idx]
-				text = text[idx+2:]
-			} else if senderJID, err := types.ParseJID(sm.SenderJID); err == nil {
-				sender = cv.waClient.LookupName(senderJID)
-			}
-		}
-
-		var thumb []byte
-		if sm.ThumbB64 != "" {
-			thumb, _ = base64.StdEncoding.DecodeString(sm.ThumbB64)
-		}
-
-		msgs = append(msgs, &Message{
-			ID:                sm.ID,
-			Sender:            sender,
-			SenderJID:         sm.SenderJID,
-			Text:              text,
-			Timestamp:         time.Unix(sm.Timestamp, 0),
-			IsOwn:             sm.FromMe,
-			MediaType:         sm.MediaType,
-			MediaPath:         sm.MediaPath,
-			Mimetype:          sm.Mimetype,
-			FileName:          sm.FileName,
-			FileSize:          sm.FileSize,
-			Width:             sm.Width,
-			Height:            sm.Height,
-			Duration:          sm.Duration,
-			Thumb:             thumb,
-			ReplyToID:         sm.ReplyToID,
-			ReplyToSenderName: sm.ReplyToSenderName,
-			ReplyToText:       sm.ReplyToText,
-			ReplyToMediaType:  sm.ReplyToMediaType,
-			Reactions:         sm.Reactions,
-			Edited:            sm.Edited,
-			Deleted:           sm.Deleted,
-			Status:            sm.Status,
-		})
+		msgs = append(msgs, cv.messageFromRecord(sm))
 	}
 	return msgs
+}
+
+func (cv *ChatView) messageFromRecord(sm client.SavedMessage) *Message {
+	sender := ""
+	text := sm.Text
+	if sm.FromMe {
+		sender = "You"
+		if sm.SenderName == "" {
+			if idx := strings.Index(text, ": "); idx >= 0 && idx < 40 {
+				text = text[idx+2:]
+			}
+		}
+	} else if sm.SenderName != "" {
+		sender = sm.SenderName
+	} else {
+		if idx := strings.Index(text, ": "); idx >= 0 && idx < 40 {
+			sender = text[:idx]
+			text = text[idx+2:]
+		} else if senderJID, err := types.ParseJID(sm.SenderJID); err == nil {
+			sender = cv.waClient.LookupName(senderJID)
+		}
+	}
+
+	var thumb []byte
+	if sm.ThumbB64 != "" {
+		thumb, _ = base64.StdEncoding.DecodeString(sm.ThumbB64)
+	}
+
+	return &Message{
+		ID:                sm.ID,
+		Sender:            sender,
+		SenderJID:         sm.SenderJID,
+		Text:              text,
+		Timestamp:         time.Unix(sm.Timestamp, 0),
+		IsOwn:             sm.FromMe,
+		MediaType:         sm.MediaType,
+		MediaPath:         sm.MediaPath,
+		Mimetype:          sm.Mimetype,
+		FileName:          sm.FileName,
+		FileSize:          sm.FileSize,
+		Width:             sm.Width,
+		Height:            sm.Height,
+		Duration:          sm.Duration,
+		Thumb:             thumb,
+		ReplyToID:         sm.ReplyToID,
+		ReplyToSenderName: sm.ReplyToSenderName,
+		ReplyToText:       sm.ReplyToText,
+		ReplyToMediaType:  sm.ReplyToMediaType,
+		Reactions:         sm.Reactions,
+		Edited:            sm.Edited,
+		Deleted:           sm.Deleted,
+		Status:            sm.Status,
+	}
+}
+
+func (cv *ChatView) appendStoredMessage(chatJID, msgID string) {
+	sm, ok, err := cv.waClient.LoadMessage(chatJID, msgID)
+	if err != nil {
+		log.Printf("appendStoredMessage load %s/%s: %v", chatJID, msgID, err)
+		return
+	}
+	if !ok {
+		log.Printf("appendStoredMessage missing %s/%s", chatJID, msgID)
+		return
+	}
+	msg := cv.messageFromRecord(sm)
+
+	cv.muMessages.Lock()
+	if _, ok := cv.messages[chatJID]; !ok {
+		cv.messages[chatJID] = cv.loadMessagesFromDisk(chatJID)
+	} else {
+		exists := false
+		for _, m := range cv.messages[chatJID] {
+			if m.ID == msgID {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			cv.messages[chatJID] = append(cv.messages[chatJID], msg)
+		}
+	}
+	isSibling := chatJID != cv.currentChatJID && cv.isSiblingOfCurrentChat(chatJID)
+	if isSibling {
+		exists := false
+		for _, m := range cv.messages[cv.currentChatJID] {
+			if m.ID == msgID {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			cv.messages[cv.currentChatJID] = append(cv.messages[cv.currentChatJID], msg)
+		}
+	}
+	cv.muMessages.Unlock()
+
+	cv.loadChatList()
+	fyne.Do(func() {
+		if (chatJID == cv.currentChatJID || isSibling) && cv.messageList != nil {
+			cv.appendMessageBubble(msg)
+		}
+		if cv.chatList != nil {
+			cv.chatList.Refresh()
+		}
+	})
 }
 
 // beginReply marks msg as the reply target for the next outgoing message

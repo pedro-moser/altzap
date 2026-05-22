@@ -201,6 +201,19 @@ const selectOneSQL = `SELECT chat_jid, id, sender_jid, sender_name, text, ts, fr
     reactions_json, edited, edited_at, deleted, deleted_at, status
     FROM messages WHERE chat_jid = ? AND id = ?`
 
+// LoadMessage returns a single persisted message. ok=false means the record
+// is not present.
+func (s *MessageStore) LoadMessage(chatJID, msgID string) (rec SavedMessage, ok bool, err error) {
+	rec, err = scanMessage(s.db.QueryRow(selectOneSQL, chatJID, msgID))
+	if err == sql.ErrNoRows {
+		return SavedMessage{}, false, nil
+	}
+	if err != nil {
+		return SavedMessage{}, false, err
+	}
+	return rec, true, nil
+}
+
 const updateSQL = `UPDATE messages SET
     sender_jid = ?, sender_name = ?, text = ?, ts = ?, from_me = ?,
     media_type = ?, media_path = ?, mimetype = ?, filename = ?, file_size = ?, width = ?, height = ?, duration = ?, thumb_b64 = ?,

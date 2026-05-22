@@ -37,6 +37,29 @@ func TestLookupName_ContactCacheBeforeChatRegistry(t *testing.T) {
 	}
 }
 
+func TestDisplayNameFromContactInfo_UsesFirstNameBeforePushName(t *testing.T) {
+	info := types.ContactInfo{
+		FirstName: "Saved First",
+		PushName:  "Public Push",
+	}
+
+	if got := displayNameFromContactInfo(info); got != "Saved First" {
+		t.Fatalf("want saved first name, got %q", got)
+	}
+}
+
+func TestRememberPushNameDoesNotOverwriteSavedContactName(t *testing.T) {
+	w := newTestClient()
+	jid, _ := types.ParseJID("5511999999999@s.whatsapp.net")
+	w.ContactCache[jid.String()] = Contact{JID: jid, Name: "Saved Name"}
+
+	w.rememberPushName(jid, "Public Push")
+
+	if got := w.LookupName(jid); got != "Saved Name" {
+		t.Fatalf("want saved contact name to win, got %q", got)
+	}
+}
+
 func TestLookupName_ChatRegistryWhenContactCacheEmptyName(t *testing.T) {
 	w := newTestClient()
 	jid, _ := types.ParseJID("5511999999999@s.whatsapp.net")

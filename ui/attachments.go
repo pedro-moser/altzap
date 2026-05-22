@@ -230,6 +230,7 @@ func (cv *ChatView) confirmAndSendImage(jid types.JID, path string) {
 // sendAttachment dispatches the actual upload + appends a local optimistic
 // bubble. Caption is only honored for image; audio/document ignore it.
 func (cv *ChatView) sendAttachment(jid types.JID, path string, kind attachKind, caption string) {
+	chatJID := jid.String()
 	go func() {
 		var (
 			msgID   string
@@ -247,32 +248,8 @@ func (cv *ChatView) sendAttachment(jid types.JID, path string, kind attachKind, 
 			fyne.Do(func() { dialog.ShowError(sendErr, cv.window) })
 			return
 		}
-		text := caption
-		if text == "" {
-			text = "[" + attachLabel(kind) + ": " + filepath.Base(path) + "]"
-		}
-		fyne.Do(func() {
-			cv.appendMessageBubble(&Message{
-				ID:        msgID,
-				Sender:    "You",
-				Text:      text,
-				Timestamp: time.Now(),
-				IsOwn:     true,
-			})
-		})
+		cv.appendStoredMessage(chatJID, msgID)
 	}()
-}
-
-func attachLabel(kind attachKind) string {
-	switch kind {
-	case attachImage:
-		return "Image"
-	case attachAudio:
-		return "Audio"
-	case attachDocument:
-		return "Document"
-	}
-	return "File"
 }
 
 // onMicClicked toggles voice recording. First click starts ffmpeg; second
@@ -313,21 +290,13 @@ func (cv *ChatView) onMicClicked() {
 	}
 
 	go func() {
-		msgID, err := cv.waClient.SendAudio(jid, path)
+		msgID, err := cv.waClient.SendVoice(jid, path)
 		if err != nil {
+			_ = os.Remove(path)
 			fyne.Do(func() { dialog.ShowError(err, cv.window) })
 			return
 		}
-		fyne.Do(func() {
-			cv.appendMessageBubble(&Message{
-				ID:        msgID,
-				Sender:    "You",
-				Text:      "[Voice message]",
-				MediaType: "voice",
-				Timestamp: time.Now(),
-				IsOwn:     true,
-			})
-		})
+		cv.appendStoredMessage(jid.String(), msgID)
 		_ = os.Remove(path)
 	}()
 }

@@ -150,18 +150,19 @@ func (l *LoginUI) onGenerateQR() {
 	l.qrImage.Resource = theme.ContentAddIcon()
 	l.qrImage.Refresh()
 
-	ch, err := l.waClient.GetQRChannel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	l.cancelFn = cancel
+	l.cancelCtx = ctx
+
+	ch, err := l.waClient.GetQRChannel(ctx)
 	if err != nil {
+		cancel()
 		l.setStatus(fmt.Sprintf("Failed to start: %v", err))
 		l.mu.Lock()
 		l.started = false
 		l.mu.Unlock()
 		return
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	l.cancelFn = cancel
-	l.cancelCtx = ctx
 
 	// Connect first, then start the QR channel
 	if err := l.waClient.Connect(); err != nil {
@@ -177,23 +178,31 @@ func (l *LoginUI) onGenerateQR() {
 
 	l.ticker = time.NewTicker(50 * time.Millisecond)
 	go func() {
+		sendState := func(s qrState) bool {
+			select {
+			case l.qrChan <- s:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		for {
 			select {
 			case item, ok := <-ch:
 				if !ok {
-					l.qrChan <- qrState{done: true}
+					sendState(qrState{done: true})
 					return
 				}
 				if item.Event == "success" {
-					l.qrChan <- qrState{done: true}
+					sendState(qrState{done: true})
 					return
 				}
 				if item.Event == "timeout" {
-					l.qrChan <- qrState{done: true, timeout: true}
+					sendState(qrState{done: true, timeout: true})
 					return
 				}
 				if item.Error != nil {
-					l.qrChan <- qrState{errMsg: fmt.Errorf("QR error: %v", item.Error)}
+					sendState(qrState{errMsg: fmt.Errorf("QR error: %v", item.Error)})
 					return
 				}
 				if item.Code != "" {
@@ -205,7 +214,9 @@ func (l *LoginUI) onGenerateQR() {
 					if err != nil {
 						continue
 					}
-					l.qrChan <- qrState{code: imgBytes}
+					if !sendState(qrState{code: imgBytes}) {
+						return
+					}
 				}
 			case <-ctx.Done():
 				return
@@ -213,13 +224,14 @@ func (l *LoginUI) onGenerateQR() {
 		}
 	}()
 
-	go l.tickLoop()
+	go l.tickLoop(ctx, l.ticker, l.qrChan)
 }
 
-func (l *LoginUI) tickLoop() {
-	for range l.ticker.C {
+func (l *LoginUI) tickLoop(ctx context.Context, ticker *time.Ticker, qrChan <-chan qrState) {
+	defer ticker.Stop()
+	for range ticker.C {
 		select {
-		case s, ok := <-l.qrChan:
+		case s, ok := <-qrChan:
 			if !ok {
 				return
 			}
@@ -252,7 +264,7 @@ func (l *LoginUI) tickLoop() {
 					l.qrImage.Refresh()
 				})
 			}
-		case <-l.cancelCtx.Done():
+		case <-ctx.Done():
 			return
 		}
 	}

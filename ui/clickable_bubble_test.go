@@ -63,7 +63,7 @@ func TestClickableBubble_DoubleTapInvokesReplyCallback(t *testing.T) {
 // and against Fyne's hit-test silently dropping events because the
 // "deepest match" widget didn't implement the right interface.
 var (
-	_ desktop.Mouseable    = (*clickableBubble)(nil)
-	_ fyne.Tappable        = (*clickableBubble)(nil)
-	_ fyne.DoubleTappable  = (*clickableBubble)(nil)
+	_ desktop.Mouseable   = (*clickableBubble)(nil)
+	_ fyne.Tappable       = (*clickableBubble)(nil)
+	_ fyne.DoubleTappable = (*clickableBubble)(nil)
 )
