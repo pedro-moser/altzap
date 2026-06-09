@@ -950,7 +950,10 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 		sort.Slice(batch, func(i, j int) bool {
 			return batch[i].Timestamp < batch[j].Timestamp
 		})
-		w.msgStore.InsertBatch(batch)
+		if err := w.msgStore.InsertBatch(batch); err != nil {
+			log.Printf("HistorySync: persist %d messages for %s: %v", len(batch), jidStr, err)
+			continue
+		}
 		totalNew += len(batch)
 	}
 
