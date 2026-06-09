@@ -59,11 +59,22 @@ func NewLoginUI(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.W
 
 func (l *LoginUI) Show() {
 	l.window.SetContent(l.buildLoginView())
+	l.autoStartQR()
 }
 
 func (l *LoginUI) ShowLogin() {
 	l.window.SetContent(l.buildLoginView())
 	l.window.Show()
+	l.autoStartQR()
+}
+
+// autoStartQR kicks off QR generation as soon as the login screen shows —
+// no need to click the button for the common path. Scheduled via fyne.Do
+// so it runs once the event loop is live (Show() is called pre-ShowAndRun).
+// The button remains as the retry affordance after a timeout or error
+// resets the `started` flag.
+func (l *LoginUI) autoStartQR() {
+	go fyne.Do(l.onGenerateQR)
 }
 
 func (l *LoginUI) buildLoginView() fyne.CanvasObject {
