@@ -1862,6 +1862,12 @@ func (cv *ChatView) onNewChat() {
 			initials.Refresh()
 		},
 	)
+	// directJIDs marks the synthetic "start a chat with +<number>" rows the
+	// search injects when the query looks like a phone number. Selecting
+	// one resolves the canonical JID via IsOnWhatsApp first — the naive
+	// <digits>@s.whatsapp.net guess can differ (e.g. the BR ninth digit).
+	directJIDs := make(map[string]bool)
+
 	list.OnSelected = func(id widget.ListItemID) {
 		if id >= len(visible) {
 			return
@@ -1870,11 +1876,23 @@ func (cv *ChatView) onNewChat() {
 		if d != nil {
 			d.Hide()
 		}
+		if directJIDs[c.JID.String()] {
+			digits := c.JID.User
+			go func() {
+				jid, err := cv.waClient.ResolveNumber(digits)
+				if err != nil {
+					fyne.Do(func() { dialog.ShowError(err, cv.window) })
+					return
+				}
+				fyne.Do(func() { cv.selectChatJID(jid.String()) })
+			}()
+			return
+		}
 		cv.selectChatJID(c.JID.String())
 	}
 
 	search := widget.NewEntry()
-	search.PlaceHolder = "Search contacts…"
+	search.PlaceHolder = "Search contacts or type a number…"
 	search.OnChanged = func(q string) {
 		ql := strings.ToLower(strings.TrimSpace(q))
 		if ql == "" {
@@ -1894,6 +1912,14 @@ func (cv *ChatView) onNewChat() {
 			fresh := make([]client.Contact, len(visible))
 			copy(fresh, visible)
 			visible = fresh
+			if digits := extractPhoneDigits(q); digits != "" {
+				j := types.NewJID(digits, types.DefaultUserServer)
+				directJIDs[j.String()] = true
+				visible = append(visible, client.Contact{
+					JID:  j,
+					Name: "💬 Conversar com +" + digits,
+				})
+			}
 		}
 		list.Refresh()
 		list.UnselectAll()

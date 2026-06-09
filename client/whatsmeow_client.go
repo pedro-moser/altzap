@@ -1733,6 +1733,24 @@ func (w *WhatsAppClient) invalidateChatSettings(jid types.JID) {
 	}
 }
 
+// ResolveNumber checks whether a raw phone number (digits only, with
+// country code) is registered on WhatsApp and returns its canonical JID.
+// The canonical JID can differ from a naive <digits>@s.whatsapp.net —
+// e.g. Brazilian numbers with/without the extra 9.
+func (w *WhatsAppClient) ResolveNumber(digits string) (types.JID, error) {
+	if w.client == nil || !w.IsConnected() {
+		return types.JID{}, fmt.Errorf("not connected to WhatsApp")
+	}
+	resp, err := w.client.IsOnWhatsApp(context.Background(), []string{"+" + digits})
+	if err != nil {
+		return types.JID{}, fmt.Errorf("check +%s: %w", digits, err)
+	}
+	if len(resp) == 0 || !resp[0].IsIn {
+		return types.JID{}, fmt.Errorf("+%s não está no WhatsApp", digits)
+	}
+	return resp[0].JID, nil
+}
+
 // SetChatArchived archives/unarchives a chat via an app-state patch — the
 // same mechanism the phone uses, so the change syncs to every device.
 // WhatsApp auto-unpins on archive (BuildArchive bundles that mutation).
