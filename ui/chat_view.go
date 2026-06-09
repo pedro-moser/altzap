@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"altzap/client"
 	"fyne.io/fyne/v2"
@@ -517,11 +518,14 @@ func avatarColor(name string) color.Color {
 	return colors[h%len(colors)]
 }
 
+// truncate caps s at n runes (not bytes — byte slicing could split a
+// multi-byte UTF-8 sequence mid-rune, mangling pt-BR text and emoji in
+// sidebar previews and notifications).
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string([]rune(s)[:n]) + "…"
 }
 
 // formatChatListTime renders a chat-list timestamp scaled to its age:
