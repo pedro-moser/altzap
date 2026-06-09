@@ -42,12 +42,19 @@ func main() {
 	// the boot window is benignly dropped (boot is sub-second; users don't
 	// re-click that fast).
 	socketPath := client.SingleInstanceSocketPath()
-	var windowSlot atomic.Value    // fyne.Window
-	var focusRestorer atomic.Value // func()
+	var windowSlot atomic.Value // fyne.Window
+	// windowVisible tracks close-to-tray state: false between the close
+	// intercept's Hide() and the next reshow. The chat view consults it so
+	// messages for the "open" chat still notify + count as unread while
+	// nobody can actually see them.
+	var windowVisible atomic.Bool
+	windowVisible.Store(true)
+	var reshowHook atomic.Value // func(): focus restore + unread reconcile
 	reshow := func(w fyne.Window) {
+		windowVisible.Store(true)
 		w.Show()
 		w.RequestFocus()
-		if v := focusRestorer.Load(); v != nil {
+		if v := reshowHook.Load(); v != nil {
 			v.(func())()
 		}
 	}
@@ -159,6 +166,7 @@ func main() {
 		desk.SetSystemTrayIcon(ui.AppIcon)
 
 		window.SetCloseIntercept(func() {
+			windowVisible.Store(false)
 			window.Hide()
 		})
 	}
@@ -166,7 +174,11 @@ func main() {
 	// wireChatView attaches notification + tray-tooltip plumbing to the chat
 	// view. Called both on fresh login and when a session resumes.
 	wireChatView := func(cv *ui.ChatView) {
-		focusRestorer.Store(func() { cv.RestoreKeyboardFocus() })
+		cv.SetWindowVisibleFn(windowVisible.Load)
+		reshowHook.Store(func() {
+			cv.RestoreKeyboardFocus()
+			cv.OnWindowShown()
+		})
 		cv.SetNotifyHook(func(sender, chatName, preview string, isGroup bool) {
 			ui.NotifyMessage(sender, chatName, preview, isGroup)
 		})

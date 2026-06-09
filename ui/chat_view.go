@@ -168,6 +168,7 @@ type ChatView struct {
 	muUnread        sync.RWMutex
 	notifyHook      func(senderName, chatName, preview string, isGroup bool) // optional, set by app
 	totalUnreadHook func(total int)                                          // optional, for tray tooltip
+	windowVisibleFn func() bool                                              // optional, set by app; nil = always visible
 
 	avatarFetched map[string]bool // chat_jid -> we've kicked off a fetch
 	muAvatars     sync.Mutex
@@ -2645,9 +2646,10 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	}
 	cv.muMessages.Unlock()
 
-	// Unread + notification: only when this chat isn't on screen and the
-	// message isn't from us. Cheap heuristic — no window-focus detection.
-	onScreen := jidStr == cur || isSibling
+	// Unread + notification: only when this chat isn't actually on screen
+	// (chat open AND window visible) and the message isn't from us. A chat
+	// "open" behind a tray-hidden window must still notify + count unread.
+	onScreen := (jidStr == cur || isSibling) && cv.isWindowVisible()
 	if !msg.Info.IsFromMe && !onScreen {
 		cv.incrementUnread(jidStr)
 		if cv.notifyHook != nil {
@@ -2746,6 +2748,51 @@ func (cv *ChatView) SetNotifyHook(fn func(senderName, chatName, preview string, 
 // changes (chat received message or was opened). Used for tray tooltip.
 func (cv *ChatView) SetTotalUnreadHook(fn func(total int)) {
 	cv.totalUnreadHook = fn
+}
+
+// SetWindowVisibleFn installs a callback reporting whether the app window is
+// currently visible (false while hidden to tray). With none installed the
+// view assumes visible — matches the pre-tray behavior.
+func (cv *ChatView) SetWindowVisibleFn(fn func() bool) {
+	cv.windowVisibleFn = fn
+}
+
+func (cv *ChatView) isWindowVisible() bool {
+	if cv == nil || cv.windowVisibleFn == nil {
+		return true
+	}
+	return cv.windowVisibleFn()
+}
+
+// siblingsOf returns the LID/PN twin JIDs of jid (possibly nil). Read-only
+// view of the shared slice — callers must not mutate it.
+func (cv *ChatView) siblingsOf(jid string) []string {
+	cv.muCachedChats.RLock()
+	defer cv.muCachedChats.RUnlock()
+	return cv.siblingJIDs[jid]
+}
+
+// OnWindowShown reconciles state after the window returns from the tray:
+// the open chat (and its LID/PN twins) was on screen the whole time, so any
+// unread accumulated for it while hidden is now seen.
+func (cv *ChatView) OnWindowShown() {
+	if cv == nil {
+		return
+	}
+	cur := cv.currentChat()
+	if cur == "" {
+		return
+	}
+	changed := false
+	for _, jid := range append([]string{cur}, cv.siblingsOf(cur)...) {
+		if cv.unreadFor(jid) > 0 {
+			cv.resetUnread(jid)
+			changed = true
+		}
+	}
+	if changed {
+		cv.refreshChats()
+	}
 }
 
 // maybeFetchAvatar kicks off an async profile picture download for the given
