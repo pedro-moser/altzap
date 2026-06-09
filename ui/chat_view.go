@@ -1212,6 +1212,8 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 	if msg.IsOwn && !msg.Deleted {
 		var check string
 		switch msg.Status {
+		case "pending":
+			check = "🕓 "
 		case "delivered":
 			check = "✓✓ "
 		case "read", "played":
@@ -2527,6 +2529,10 @@ func (cv *ChatView) sendMessage() {
 		Text:      text,
 		Timestamp: time.Now(),
 		IsOwn:     true,
+		// "pending" renders as 🕓 until the server ACKs the send. Never
+		// persisted — the client stores the record only after a successful
+		// round-trip, with Status "".
+		Status: "pending",
 	}
 	if rt != nil {
 		quotedSender := rt.Sender
@@ -2569,7 +2575,25 @@ func (cv *ChatView) sendMessage() {
 					cv.refreshMessages()
 				}
 			})
+			return
 		}
+		// ACKed: clear "pending" → ✓, unless a receipt already upgraded
+		// the status (delivery can race the send round-trip).
+		fyne.Do(func() {
+			cv.muMessages.Lock()
+			for _, m := range cv.messages[chatJID] {
+				if m.ID == msgID {
+					if m.Status == "pending" {
+						m.Status = ""
+					}
+					break
+				}
+			}
+			cv.muMessages.Unlock()
+			if chatJID == cv.currentChatJID && cv.messageList != nil {
+				cv.refreshMessages()
+			}
+		})
 	}()
 }
 
