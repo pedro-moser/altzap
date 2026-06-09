@@ -167,10 +167,13 @@ type Chat struct {
 	LastMessageTime int64
 	IsGroup         bool
 	AvatarURL       string
-	// Archived mirrors whatsmeow_chat_settings.archived: true when the
-	// user has archived the chat on their phone (synced via app_state /
-	// history sync). Read-only in v1 — toggling from AltZap comes later.
+	// Archived/Pinned/Muted mirror whatsmeow's chat_settings (synced from
+	// the phone via app_state / history sync). Read-only in v1 — toggling
+	// from AltZap comes later. Muted is pre-resolved against the sidebar
+	// load instant since MutedUntil may be "forever" or already expired.
 	Archived bool
+	Pinned   bool
+	Muted    bool
 }
 
 // WhatsAppClient wraps the whatsmeow client with higher-level operations
@@ -189,7 +192,10 @@ type WhatsAppClient struct {
 	OnMessageStatus   func(MessageStatus)                    // fires when delivered/read receipt arrives
 	OnContactsUpdated func()                                 // fires after a background contact-cache refresh
 	OnChatMarkedRead  func(chatJID string)                   // fires when the chat was read on another device (phone)
-	muChannels        sync.RWMutex
+	// OnChatSettingsChanged fires when archive/pin/mute state changed on the
+	// phone. May run on whatsmeow's event goroutine — handlers must not block.
+	OnChatSettingsChanged func()
+	muChannels            sync.RWMutex
 	// ContactCache holds *saved* address-book names (full/first only),
 	// owned exclusively by FetchContacts — safe to replace wholesale.
 	// pushNameCache holds network-provided display names (push/business),
@@ -217,19 +223,26 @@ type WhatsAppClient struct {
 	// fire once per contact during sync) into a single background FetchContacts.
 	muContactRefresh    sync.Mutex
 	contactRefreshTimer *time.Timer
+
+	// chatSettingsCache memoizes phone-synced per-chat flags (archive/pin/
+	// mute). The sidebar consults one entry per row per reload — uncached
+	// that's one SQL roundtrip each. Entries drop on app-state events.
+	chatSettingsCache map[string]ChatSettingsInfo
+	muChatSettings    sync.RWMutex
 }
 
 // NewWhatsAppClient creates a new WhatsApp client instance.
 // msgStore is required — chat history persistence goes through it.
 func NewWhatsAppClient(clientStore *sqlstore.Container, msgStore *MessageStore) *WhatsAppClient {
 	wa := &WhatsAppClient{
-		msgStore:      msgStore,
-		ContactCache:  make(map[string]Contact),
-		pushNameCache: make(map[string]string),
-		messages:      make(map[string][]MessageEvent),
-		chatRegistry:  make(map[string]string),
-		groupCache:    make(map[string]string),
-		lidPNCache:    make(map[string]types.JID),
+		msgStore:          msgStore,
+		ContactCache:      make(map[string]Contact),
+		pushNameCache:     make(map[string]string),
+		messages:          make(map[string][]MessageEvent),
+		chatRegistry:      make(map[string]string),
+		groupCache:        make(map[string]string),
+		lidPNCache:        make(map[string]types.JID),
+		chatSettingsCache: make(map[string]ChatSettingsInfo),
 	}
 
 	device, err := clientStore.GetFirstDevice(context.Background())
@@ -299,6 +312,12 @@ func NewWhatsAppClient(clientStore *sqlstore.Container, msgStore *MessageStore) 
 			if v.Action.GetRead() && wa.OnChatMarkedRead != nil {
 				wa.OnChatMarkedRead(v.JID.String())
 			}
+		case *events.Archive:
+			wa.invalidateChatSettings(v.JID)
+		case *events.Pin:
+			wa.invalidateChatSettings(v.JID)
+		case *events.Mute:
+			wa.invalidateChatSettings(v.JID)
 		}
 	})
 
@@ -1653,20 +1672,64 @@ func (w *WhatsAppClient) PhoneForJID(jid types.JID) string {
 	return ""
 }
 
-// IsChatArchived returns true when the user has archived the given
-// chat on their phone (read from whatsmeow's chat_settings store,
-// which is populated via history/app-state sync). False on any
-// error or unknown chat — callers treat the absence of an archive
-// flag as "not archived" so the sidebar errs toward visibility.
-func (w *WhatsAppClient) IsChatArchived(jid types.JID) bool {
+// ChatSettingsInfo mirrors the phone-synced flags for one chat (read from
+// whatsmeow's chat_settings store, populated via history/app-state sync).
+type ChatSettingsInfo struct {
+	Archived   bool
+	Pinned     bool
+	MutedUntil time.Time
+}
+
+// MutedAt reports whether the chat is muted at the given instant. whatsmeow
+// stores the zero time for unmuted chats and a (possibly far-future)
+// timestamp for muted ones, so a plain Before covers every case, including
+// "muted forever" and expired mutes.
+func (s ChatSettingsInfo) MutedAt(now time.Time) bool {
+	return now.Before(s.MutedUntil)
+}
+
+// ChatSettings returns the archive/pin/mute flags for a chat, memoized until
+// an app-state event invalidates the entry. Zero value on any error or
+// unknown chat — callers err toward visible/unmuted, matching the previous
+// IsChatArchived behavior.
+func (w *WhatsAppClient) ChatSettings(jid types.JID) ChatSettingsInfo {
+	key := jid.String()
+	w.muChatSettings.RLock()
+	if s, ok := w.chatSettingsCache[key]; ok {
+		w.muChatSettings.RUnlock()
+		return s
+	}
+	w.muChatSettings.RUnlock()
+
 	if w.client == nil || w.client.Store == nil || w.client.Store.ChatSettings == nil {
-		return false
+		return ChatSettingsInfo{}
 	}
 	settings, err := w.client.Store.ChatSettings.GetChatSettings(context.Background(), jid)
 	if err != nil {
-		return false
+		// Not cached: transient store errors shouldn't pin a zero value.
+		return ChatSettingsInfo{}
 	}
-	return settings.Archived
+	info := ChatSettingsInfo{
+		Archived:   settings.Archived,
+		Pinned:     settings.Pinned,
+		MutedUntil: settings.MutedUntil,
+	}
+	w.muChatSettings.Lock()
+	w.chatSettingsCache[key] = info
+	w.muChatSettings.Unlock()
+	return info
+}
+
+// invalidateChatSettings drops one chat's cached flags (the store was
+// already updated by whatsmeow's app-state processor before the event
+// fired) and nudges the UI to repaint.
+func (w *WhatsAppClient) invalidateChatSettings(jid types.JID) {
+	w.muChatSettings.Lock()
+	delete(w.chatSettingsCache, jid.String())
+	w.muChatSettings.Unlock()
+	if w.OnChatSettingsChanged != nil {
+		w.OnChatSettingsChanged()
+	}
 }
 
 // FetchGroups loads all joined groups from the WhatsApp servers into the cache.

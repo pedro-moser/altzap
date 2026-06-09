@@ -850,7 +850,13 @@ func (cv *ChatView) buildChatList() *widget.List {
 			if displayName == "" {
 				displayName = chat.JID.User
 			}
-			nameLabel.SetText(displayName)
+			// Pin/mute markers live in the rendered strings only —
+			// displayName stays clean for initials/avatar color below.
+			rowTitle := displayName
+			if chat.Pinned {
+				rowTitle = "📌 " + rowTitle
+			}
+			nameLabel.SetText(rowTitle)
 
 			preview := chat.LastMessage
 			if preview == "" {
@@ -858,7 +864,11 @@ func (cv *ChatView) buildChatList() *widget.List {
 			}
 			subLabel.SetText(truncate(preview, 60))
 
-			timeText.Text = formatChatListTime(chat.LastMessageTime)
+			rowTime := formatChatListTime(chat.LastMessageTime)
+			if chat.Muted {
+				rowTime = "🔕 " + rowTime
+			}
+			timeText.Text = rowTime
 			timeText.Color = subtitleColor
 			timeText.Refresh()
 
@@ -1576,18 +1586,24 @@ func (cv *ChatView) loadChatList() {
 	cv.muCachedChats.Unlock()
 
 	// Split into "inbox" (default view) and "archived" buckets so the
-	// sidebar can render only one at a time. Archive state mirrors the
-	// phone via whatsmeow_chat_settings — populated lazily here
-	// because it's a per-chat SQL roundtrip.
+	// sidebar can render only one at a time. Archive/pin/mute mirror the
+	// phone via whatsmeow's chat settings (memoized in the client, so this
+	// loop is cheap after the first pass). Pinned chats float to the top
+	// of the inbox, preserving recency order within each partition.
 	var inboxChats, archivedChats []client.Chat
+	now := time.Now()
 	for _, chat := range activeChats {
-		if cv.waClient.IsChatArchived(chat.JID) {
+		st := cv.waClient.ChatSettings(chat.JID)
+		chat.Pinned = st.Pinned
+		chat.Muted = st.MutedAt(now)
+		if st.Archived {
 			chat.Archived = true
 			archivedChats = append(archivedChats, chat)
 		} else {
 			inboxChats = append(inboxChats, chat)
 		}
 	}
+	inboxChats = pinnedFirst(inboxChats)
 
 	cv.muCachedChats.Lock()
 	cv.inboxChats = inboxChats
@@ -2729,7 +2745,10 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 			cv.flushPendingReads(cur)
 		} else {
 			cv.incrementUnread(jidStr)
-			if cv.notifyHook != nil {
+			// Muted chats still count unread but stay silent — matches
+			// the phone's behavior.
+			muted := cv.waClient.ChatSettings(msg.Info.Chat).MutedAt(time.Now())
+			if cv.notifyHook != nil && !muted {
 				chatName := cv.waClient.LookupName(msg.Info.Chat)
 				cv.notifyHook(senderName, chatName, previewForMessage(newMsg), msg.Info.IsGroup)
 			}

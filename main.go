@@ -216,6 +216,13 @@ func main() {
 		}
 	}
 
+	waClient.OnChatSettingsChanged = func() {
+		// Fires on whatsmeow's event goroutine, possibly in bursts during a
+		// full app-state sync — the debounced reload keeps the event loop
+		// unblocked and coalesces the repaints. Nil-safe before login.
+		chatView.ScheduleSidebarReload()
+	}
+
 	waClient.OnLogin = func() {
 		log.Println("Login callback triggered - transitioning to chat view")
 		// Tear down a prior view (e.g. on relink/re-pair in the same session)
