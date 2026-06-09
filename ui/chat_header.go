@@ -147,17 +147,48 @@ func (cv *ChatView) showChatMenu(anchor fyne.CanvasObject) {
 	info := fyne.NewMenuItem("Contact info", cv.showContactInfo)
 	info.Icon = theme.InfoIcon()
 
+	archiveLabel := "Arquivar conversa"
+	if parsed, err := types.ParseJID(cv.currentChatJID); err == nil &&
+		cv.waClient.ChatSettings(parsed).Archived {
+		archiveLabel = "Desarquivar conversa"
+	}
+	archive := fyne.NewMenuItem(archiveLabel, cv.toggleArchiveCurrent)
+	archive.Icon = theme.FolderIcon()
+
 	settings := fyne.NewMenuItem("Settings…", cv.showSettings)
 	settings.Icon = theme.SettingsIcon()
 
 	menu := fyne.NewMenu("",
 		info,
+		archive,
 		fyne.NewMenuItemSeparator(),
 		settings,
 	)
 	popup := widget.NewPopUpMenu(menu, c)
 	pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(anchor)
 	popup.ShowAtPosition(fyne.NewPos(pos.X, pos.Y+anchor.Size().Height+4))
+}
+
+// toggleArchiveCurrent flips the open chat's archived state on the server
+// (app-state patch → syncs to the phone) and reloads the sidebar so the
+// chat hops between the inbox and the "Arquivadas" bucket.
+func (cv *ChatView) toggleArchiveCurrent() {
+	jidStr := cv.currentChat()
+	if jidStr == "" {
+		return
+	}
+	jid, err := types.ParseJID(jidStr)
+	if err != nil {
+		return
+	}
+	target := !cv.waClient.ChatSettings(jid).Archived
+	go func() {
+		if err := cv.waClient.SetChatArchived(jid, target); err != nil {
+			fyne.Do(func() { dialog.ShowError(err, cv.window) })
+			return
+		}
+		cv.ScheduleSidebarReload()
+	}()
 }
 
 // showContactInfo shows a "who is this chat" panel: large avatar, display

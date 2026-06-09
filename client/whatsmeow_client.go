@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -1730,6 +1731,30 @@ func (w *WhatsAppClient) invalidateChatSettings(jid types.JID) {
 	if w.OnChatSettingsChanged != nil {
 		w.OnChatSettingsChanged()
 	}
+}
+
+// SetChatArchived archives/unarchives a chat via an app-state patch — the
+// same mechanism the phone uses, so the change syncs to every device.
+// WhatsApp auto-unpins on archive (BuildArchive bundles that mutation).
+// The local cache is updated optimistically; the server's events.Archive
+// echo re-invalidates it with the authoritative state.
+func (w *WhatsAppClient) SetChatArchived(jid types.JID, archived bool) error {
+	if w.client == nil || !w.IsConnected() {
+		return fmt.Errorf("not connected to WhatsApp")
+	}
+	patch := appstate.BuildArchive(jid, archived, time.Time{}, nil)
+	if err := w.client.SendAppState(context.Background(), patch); err != nil {
+		return fmt.Errorf("send archive app state: %w", err)
+	}
+	cur := w.ChatSettings(jid) // pin/mute flags stay real while we mutate
+	cur.Archived = archived
+	if archived {
+		cur.Pinned = false
+	}
+	w.muChatSettings.Lock()
+	w.chatSettingsCache[jid.String()] = cur
+	w.muChatSettings.Unlock()
+	return nil
 }
 
 // FetchGroups loads all joined groups from the WhatsApp servers into the cache.
