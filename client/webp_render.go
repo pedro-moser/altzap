@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -190,7 +191,7 @@ func decodeVP8Frame(body []byte) (image.Image, error) {
 // sibling .png cache, with bounded concurrency. Idempotent. Designed to be
 // called once at startup in a goroutine — UI never blocks on this.
 func PreTranscodeWebPMedia() {
-	const workers = 4
+	const workers = 1
 	jobs := make(chan string, workers)
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -222,6 +223,7 @@ func PreTranscodeWebPMedia() {
 	wg.Wait()
 	if count > 0 {
 		log.Printf("PreTranscodeWebPMedia: prepared %d webp→png caches", count)
+		debug.FreeOSMemory()
 	}
 }
 

@@ -51,16 +51,19 @@ type MessageStore struct {
 
 // OpenMessageStore opens (creating if needed) a SQLite database at path
 // and ensures the schema is current. The DSN turns on WAL, busy_timeout,
-// and a 32MB page cache.
+// and an 8MB page cache. messages.db is small enough that the old 32MB cache
+// mostly inflated idle RSS without buying much.
 func OpenMessageStore(path string) (*MessageStore, error) {
 	dsn := fmt.Sprintf(
-		"file:%s?_journal_mode=WAL&_synchronous=NORMAL&_cache_size=-32000&_busy_timeout=5000&_foreign_keys=on",
+		"file:%s?_journal_mode=WAL&_synchronous=NORMAL&_cache_size=-8000&_busy_timeout=5000&_foreign_keys=on",
 		path,
 	)
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if _, err := db.Exec(schemaSQL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
@@ -273,14 +276,19 @@ type ChatSummary struct {
 }
 
 const chatSummariesSQL = `
-SELECT chat_jid, ts, text, from_me, sender_name, media_type
-FROM (
-    SELECT chat_jid, ts, text, from_me, sender_name, media_type,
-           ROW_NUMBER() OVER (PARTITION BY chat_jid ORDER BY ts DESC) AS rn
-    FROM messages
+WITH chats AS (
+    SELECT DISTINCT chat_jid FROM messages
 )
-WHERE rn = 1
-ORDER BY ts DESC
+SELECT m.chat_jid, m.ts, m.text, m.from_me, m.sender_name, m.media_type
+FROM chats AS c
+JOIN messages AS m ON m.rowid = (
+    SELECT rowid
+    FROM messages
+    WHERE chat_jid = c.chat_jid
+    ORDER BY ts DESC, rowid DESC
+    LIMIT 1
+)
+ORDER BY m.ts DESC
 `
 
 // ChatSummaries returns every known chat with its most recent message,

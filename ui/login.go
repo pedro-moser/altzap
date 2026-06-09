@@ -274,12 +274,16 @@ func (l *LoginUI) setStatus(msg string) {
 	l.status.SetText(msg)
 }
 
-func (l *LoginUI) TransitionToChat(chatView interface{ Build() fyne.CanvasObject }) {
+func (l *LoginUI) TransitionToChat(chatView interface {
+	Build() fyne.CanvasObject
+	RestoreKeyboardFocus()
+}) {
 	fyne.Do(func() {
 		if l.cancelFn != nil {
 			l.cancelFn()
 		}
 		dialog.ShowInformation("Connected", "Successfully logged in to WhatsApp!", l.window)
 		l.window.SetContent(chatView.Build())
+		chatView.RestoreKeyboardFocus()
 	})
 }

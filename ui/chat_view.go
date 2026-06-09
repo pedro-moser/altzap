@@ -1413,12 +1413,25 @@ func (cv *ChatView) onSearch(text string) {
 		cv.searchEscPop = pushEsc(cv.closeSearch)
 	}
 
-	queryLower := strings.ToLower(text)
-	var filtered []client.Chat
-
 	cv.muCachedChats.RLock()
-	seen := make(map[string]bool)
-	for _, chat := range cv.allChats {
+	filtered := filterChatsByQuery(cv.allChats, text)
+	cv.muCachedChats.RUnlock()
+
+	cv.muCachedChats.Lock()
+	cv.filteredChats = filtered
+	cv.isSearching = true
+	cv.muCachedChats.Unlock()
+
+	fyne.Do(func() { cv.chatList.Refresh() })
+}
+
+// filterChatsByQuery preserves the source order. loadChatList supplies chats
+// newest-first, so search results remain ordered by conversation recency.
+func filterChatsByQuery(chats []client.Chat, query string) []client.Chat {
+	queryLower := strings.ToLower(query)
+	filtered := make([]client.Chat, 0, len(chats))
+	seen := make(map[string]bool, len(chats))
+	for _, chat := range chats {
 		jidStr := chat.JID.String()
 		if seen[jidStr] {
 			continue
@@ -1429,14 +1442,7 @@ func (cv *ChatView) onSearch(text string) {
 			seen[jidStr] = true
 		}
 	}
-	cv.muCachedChats.RUnlock()
-
-	cv.muCachedChats.Lock()
-	cv.filteredChats = filtered
-	cv.isSearching = true
-	cv.muCachedChats.Unlock()
-
-	fyne.Do(func() { cv.chatList.Refresh() })
+	return filtered
 }
 
 func (cv *ChatView) loadChatList() {
@@ -1486,10 +1492,6 @@ func (cv *ChatView) loadChatList() {
 	}
 	chats = filtered
 
-	cv.muCachedChats.Lock()
-	cv.allChats = chats
-	cv.muCachedChats.Unlock()
-
 	summaryByJID := make(map[string]client.ChatSummary, len(summaries))
 	for _, s := range summaries {
 		summaryByJID[s.ChatJID] = s
@@ -1516,6 +1518,7 @@ func (cv *ChatView) loadChatList() {
 	activeChats, siblings := dedupeLIDPNTwins(activeChats, cv.waClient.PhoneForJID)
 
 	cv.muCachedChats.Lock()
+	cv.allChats = activeChats
 	cv.siblingJIDs = siblings
 	cv.muCachedChats.Unlock()
 
@@ -1864,8 +1867,43 @@ func (cv *ChatView) focusComposer() {
 	if cv.searchEscPop != nil {
 		cv.closeSearch()
 	}
+	if cv.currentChat() == "" {
+		if cv.window != nil && cv.searchEntry != nil {
+			cv.window.Canvas().Focus(cv.searchEntry)
+		}
+		return
+	}
 	if cv.window != nil && cv.messageInput != nil {
 		cv.window.Canvas().Focus(cv.messageInput)
+	}
+}
+
+func (cv *ChatView) keyboardFocusTarget() fyne.Focusable {
+	if cv == nil {
+		return nil
+	}
+	if cv.searchEntry != nil && (cv.searchEscPop != nil || cv.isSearchActive()) {
+		return cv.searchEntry
+	}
+	if cv.currentChat() != "" && cv.messageInput != nil {
+		return cv.messageInput
+	}
+	if cv.searchEntry != nil {
+		return cv.searchEntry
+	}
+	return nil
+}
+
+// RestoreKeyboardFocus gives a newly shown window a focusable object from the
+// current canvas. Keeping a raw widget across Hide/Show is unsafe because Fyne
+// may have replaced the content or removed an overlay in the meantime.
+func (cv *ChatView) RestoreKeyboardFocus() {
+	if cv == nil || cv.window == nil {
+		return
+	}
+	if target := cv.keyboardFocusTarget(); target != nil {
+		log.Printf("keyboard focus restore target=%T", target)
+		cv.window.Canvas().Focus(target)
 	}
 }
 
@@ -1902,13 +1940,11 @@ func (cv *ChatView) closeSearch() {
 		return
 	}
 	cv.searchEntry.SetText("")
-	if cv.window != nil && cv.messageInput != nil {
-		cv.window.Canvas().Focus(cv.messageInput)
-	}
 	if cv.searchEscPop != nil {
 		cv.searchEscPop()
 		cv.searchEscPop = nil
 	}
+	cv.RestoreKeyboardFocus()
 }
 
 // confirmSearch opens the first chat in the currently-filtered sidebar

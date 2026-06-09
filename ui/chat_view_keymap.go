@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"log"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/driver/desktop"
 )
@@ -30,16 +32,20 @@ func (cv *ChatView) installShortcuts() {
 			KeyName:  key,
 			Modifier: fyne.KeyModifierControl,
 		}
-		canvas.AddShortcut(shortcut, func(_ fyne.Shortcut) { handler() })
+		loggedHandler := func() {
+			log.Printf("keyboard shortcut Ctrl+%s focused=%T", key, canvas.Focused())
+			handler()
+		}
+		canvas.AddShortcut(shortcut, func(_ fyne.Shortcut) { loggedHandler() })
 		// Mirror onto entries so the chord still fires when an entry has
 		// focus. widget.Entry is fyne.Shortcutable and Fyne dispatches
 		// focused-widget shortcuts exclusively, silently dropping anything
 		// Entry doesn't itself recognize.
 		if cv.messageInput != nil {
-			cv.messageInput.AddCustomShortcut(shortcut, handler)
+			cv.messageInput.AddCustomShortcut(shortcut, loggedHandler)
 		}
 		if cv.searchEntry != nil {
-			cv.searchEntry.AddCustomShortcut(shortcut, handler)
+			cv.searchEntry.AddCustomShortcut(shortcut, loggedHandler)
 		}
 	}
 

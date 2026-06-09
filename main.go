@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
+	"time"
 
 	"altzap/client"
 	"altzap/ui"
@@ -38,18 +42,13 @@ func main() {
 	// the boot window is benignly dropped (boot is sub-second; users don't
 	// re-click that fast).
 	socketPath := client.SingleInstanceSocketPath()
-	var windowSlot atomic.Value // fyne.Window
-	// lastFocused remembers which widget held keyboard focus when the window was
-	// hidden. Fyne drops widget focus across Hide()→Show(): the reopened window
-	// is keyboard-active (canvas shortcuts fire) but no widget receives typed
-	// runes until one is focused, so typing is dead until the user clicks. reshow
-	// restores it. Touched only on the UI thread (close intercept + fyne.Do).
-	var lastFocused fyne.Focusable
+	var windowSlot atomic.Value    // fyne.Window
+	var focusRestorer atomic.Value // func()
 	reshow := func(w fyne.Window) {
 		w.Show()
 		w.RequestFocus()
-		if lastFocused != nil {
-			w.Canvas().Focus(lastFocused)
+		if v := focusRestorer.Load(); v != nil {
+			v.(func())()
 		}
 	}
 	releaseLock, isSecondary, err := client.Acquire(socketPath, func() {
@@ -69,6 +68,7 @@ func main() {
 	}
 	log.Printf("single-instance: primary, listening on %s", socketPath)
 	defer releaseLock()
+	startPprofIfEnabled()
 
 	fApp := app.NewWithID("com.altzap.app")
 	fApp.Settings().SetTheme(ui.CatppuccinTheme())
@@ -102,7 +102,7 @@ func main() {
 	}
 
 	logger := waLog.Stdout("Main", "INFO", false)
-	sessionDB := filepath.Join(dataDir, "whatsapp.db") + "?_foreign_keys=on"
+	sessionDB := filepath.Join(dataDir, "whatsapp.db") + "?_foreign_keys=on&_cache_size=-8000&_busy_timeout=5000"
 	storeContainer, err := sqlstore.New(context.Background(), "sqlite3", sessionDB, logger)
 	if err != nil {
 		log.Fatalf("Failed to create client store: %v", err)
@@ -159,7 +159,6 @@ func main() {
 		desk.SetSystemTrayIcon(ui.AppIcon)
 
 		window.SetCloseIntercept(func() {
-			lastFocused = window.Canvas().Focused()
 			window.Hide()
 		})
 	}
@@ -167,6 +166,7 @@ func main() {
 	// wireChatView attaches notification + tray-tooltip plumbing to the chat
 	// view. Called both on fresh login and when a session resumes.
 	wireChatView := func(cv *ui.ChatView) {
+		focusRestorer.Store(func() { cv.RestoreKeyboardFocus() })
 		cv.SetNotifyHook(func(sender, chatName, preview string, isGroup bool) {
 			ui.NotifyMessage(sender, chatName, preview, isGroup)
 		})
@@ -222,6 +222,7 @@ func main() {
 		chatView = ui.NewChatView(fApp, waClient, window)
 		wireChatView(chatView)
 		window.SetContent(chatView.Build())
+		chatView.RestoreKeyboardFocus()
 		if err := waClient.Connect(); err != nil {
 			log.Fatalf("Failed to connect: %v", err)
 		}
@@ -242,4 +243,25 @@ func main() {
 	})
 
 	window.ShowAndRun()
+}
+
+func startPprofIfEnabled() {
+	addr := strings.TrimSpace(os.Getenv("ALTZAP_PPROF"))
+	if addr == "" {
+		return
+	}
+	if addr == "1" || strings.EqualFold(addr, "true") {
+		addr = "127.0.0.1:6060"
+	}
+
+	server := &http.Server{
+		Addr:              addr,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		log.Printf("pprof: listening on http://%s/debug/pprof/", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("pprof: %v", err)
+		}
+	}()
 }
