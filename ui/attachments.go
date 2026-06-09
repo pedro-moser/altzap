@@ -374,7 +374,17 @@ func (cv *ChatView) inputBarBuild() fyne.CanvasObject {
 		cv.confirmAndSendImage(jid, path)
 	})
 	cv.messageInput.PlaceHolder = "Type a message"
-	cv.messageInput.OnSubmitted = func(string) { cv.sendMessage() }
+	cv.messageInput.OnSendRequested = cv.sendMessage
+	cv.messageInput.SetMinRowsVisible(1)
+	// Grow with content up to 5 visual rows; SetText("") after a send
+	// shrinks it back through this same path.
+	cv.messageInput.OnChanged = func(s string) {
+		rows := strings.Count(s, "\n") + 1
+		if rows > 5 {
+			rows = 5
+		}
+		cv.messageInput.SetMinRowsVisible(rows)
+	}
 
 	// Reply preview: filled by beginReply, cleared by cancelReply. Vertical
 	// accent bar (color = sender's avatar tint) on the left, sender + text

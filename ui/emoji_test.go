@@ -36,3 +36,39 @@ func TestInsertAtRuneOffset(t *testing.T) {
 		})
 	}
 }
+
+func TestRuneOffsetForCursor(t *testing.T) {
+	text := "çã\nab\nfim"
+	cases := []struct {
+		name     string
+		row, col int
+		want     int
+	}{
+		{"start", 0, 0, 0},
+		{"end of accented line", 0, 2, 2},
+		{"start of second line", 1, 0, 3},
+		{"middle of second line", 1, 1, 4},
+		{"third line", 2, 3, 9},
+		{"col overflow clamps to line end", 0, 99, 2},
+		{"row overflow clamps to last line", 99, 1, 7},
+		{"negative clamps to zero", -1, -1, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := runeOffsetForCursor(text, tc.row, tc.col); got != tc.want {
+				t.Fatalf("runeOffsetForCursor(%q, %d, %d) = %d, want %d",
+					text, tc.row, tc.col, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCursorForRuneOffsetRoundTrip(t *testing.T) {
+	text := "çã\nab\nfim"
+	for off := 0; off <= 9; off++ {
+		row, col := cursorForRuneOffset(text, off)
+		if back := runeOffsetForCursor(text, row, col); back != off {
+			t.Fatalf("offset %d → (%d,%d) → %d: round trip broke", off, row, col, back)
+		}
+	}
+}

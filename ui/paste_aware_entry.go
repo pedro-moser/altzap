@@ -34,6 +34,13 @@ type pasteAwareEntry struct {
 	tryImagePaste func() (string, error) // typically client.PasteImageFromClipboard
 	onImagePasted func(path string)      // called with the persisted tmp path
 
+	// OnSendRequested fires on Enter without Shift. The composer is a
+	// multi-line Entry, so widget.Entry's OnSubmitted (single-line only)
+	// never triggers — this is the keyboard send path. Shift+Enter falls
+	// through to the embedded Entry and inserts a newline.
+	OnSendRequested func()
+	shiftHeld       bool // touched only on the UI thread (KeyDown/KeyUp/TypedKey)
+
 	customMu        sync.RWMutex
 	customShortcuts map[customShortcutKey]func()
 }
@@ -57,7 +64,11 @@ func newPasteAwareEntry(tryImagePaste func() (string, error), onImagePasted func
 		tryImagePaste: tryImagePaste,
 		onImagePasted: onImagePasted,
 	}
-	e.MultiLine = false
+	// Multi-line so Shift+Enter can break lines. The 1-row baseline height
+	// is applied by inputBarBuild — SetMinRowsVisible refreshes the widget,
+	// which needs a running Fyne app (headless tests construct this entry).
+	e.MultiLine = true
+	e.Wrapping = fyne.TextWrapWord
 	e.ExtendBaseWidget(e)
 	return e
 }
@@ -147,12 +158,40 @@ func (e *pasteAwareEntry) TypedShortcut(s fyne.Shortcut) {
 // composer is focused the chat view's reply-mode/search dismiss
 // handlers would otherwise never fire. Forwarding here keeps ESC
 // dismissal consistent regardless of which widget holds focus.
+//
+// Enter (without Shift) is the send gesture; Shift+Enter delegates to
+// the embedded multi-line Entry, which inserts the newline.
 func (e *pasteAwareEntry) TypedKey(key *fyne.KeyEvent) {
-	if key != nil && key.Name == fyne.KeyEscape {
-		handleEsc()
-		return
+	if key != nil {
+		switch key.Name {
+		case fyne.KeyEscape:
+			handleEsc()
+			return
+		case fyne.KeyReturn, fyne.KeyEnter:
+			if !e.shiftHeld && e.OnSendRequested != nil {
+				e.OnSendRequested()
+				return
+			}
+		}
 	}
 	e.Entry.TypedKey(key)
+}
+
+// KeyDown / KeyUp track the physical Shift state so TypedKey can tell
+// Enter (send) from Shift+Enter (newline). Both delegate to the embedded
+// Entry, which consumes the same events for shift-selection.
+func (e *pasteAwareEntry) KeyDown(key *fyne.KeyEvent) {
+	if key != nil && (key.Name == desktop.KeyShiftLeft || key.Name == desktop.KeyShiftRight) {
+		e.shiftHeld = true
+	}
+	e.Entry.KeyDown(key)
+}
+
+func (e *pasteAwareEntry) KeyUp(key *fyne.KeyEvent) {
+	if key != nil && (key.Name == desktop.KeyShiftLeft || key.Name == desktop.KeyShiftRight) {
+		e.shiftHeld = false
+	}
+	e.Entry.KeyUp(key)
 }
 
 // escAwareEntry is a lightweight widget.Entry used for the sidebar search

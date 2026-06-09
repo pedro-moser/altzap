@@ -1213,8 +1213,9 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 				} else {
 					// Cheap width probe: canvas.NewText is ~10x faster than
 					// widget.NewLabel because it skips the widget lifecycle.
-					probe := canvas.NewText(msg.Text, ctpText)
-					textNatural = probe.MinSize().Width
+					// Measured per line — a single probe of multi-line text
+					// would report the sum of every line as one huge width.
+					textNatural = maxProbeLineWidth(msg.Text)
 					wrap := textNatural+bubblePadding > maxBubbleWidth
 					body = buildMessageText(msg.Text, wrap)
 				}
@@ -1297,6 +1298,20 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 		return container.NewVBox(buildDateChip(dateSep), bubbleRow)
 	}
 	return bubbleRow
+}
+
+// maxProbeLineWidth measures the widest line of text via throwaway
+// canvas.Text probes (no widget lifecycle, so this is cheap even inside
+// the bubble-build hot path).
+func maxProbeLineWidth(text string) float32 {
+	var max float32
+	for _, line := range strings.Split(text, "\n") {
+		probe := canvas.NewText(line, ctpText)
+		if w := probe.MinSize().Width; w > max {
+			max = w
+		}
+	}
+	return max
 }
 
 // buildDateChip is the centered "Today" / "Yesterday" / weekday / date label

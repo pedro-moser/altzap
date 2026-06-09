@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"strings"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/layout"
@@ -97,15 +99,61 @@ func insertAtRuneOffset(s, ins string, pos int) (string, int) {
 	return out, pos + len([]rune(ins))
 }
 
-// insertEmoji writes s into messageInput at the caret. Entry.CursorColumn
-// is a RUNE index (not a byte offset) — with accented text or emoji before
-// the caret, byte slicing would insert at the wrong spot or split a rune.
+// runeOffsetForCursor converts a multi-line Entry caret (row, col — both
+// rune-indexed within their line) into a global rune offset in text.
+func runeOffsetForCursor(text string, row, col int) int {
+	lines := strings.Split(text, "\n")
+	if row < 0 {
+		row = 0
+	}
+	if row >= len(lines) {
+		row = len(lines) - 1
+	}
+	offset := 0
+	for i := 0; i < row; i++ {
+		offset += len([]rune(lines[i])) + 1 // +1 for the newline itself
+	}
+	lineLen := len([]rune(lines[row]))
+	if col < 0 {
+		col = 0
+	}
+	if col > lineLen {
+		col = lineLen
+	}
+	return offset + col
+}
+
+// cursorForRuneOffset is the inverse: global rune offset → (row, col).
+func cursorForRuneOffset(text string, off int) (row, col int) {
+	runes := []rune(text)
+	if off < 0 {
+		off = 0
+	}
+	if off > len(runes) {
+		off = len(runes)
+	}
+	for i := 0; i < off; i++ {
+		if runes[i] == '\n' {
+			row++
+			col = 0
+		} else {
+			col++
+		}
+	}
+	return row, col
+}
+
+// insertEmoji writes s into messageInput at the caret. Entry exposes the
+// caret as (CursorRow, CursorColumn) rune indices — never byte offsets —
+// so all slicing goes through the rune-based helpers above.
 func (cv *ChatView) insertEmoji(s string) {
 	if cv.messageInput == nil {
 		return
 	}
-	newText, newPos := insertAtRuneOffset(cv.messageInput.Text, s, cv.messageInput.CursorColumn)
+	text := cv.messageInput.Text
+	pos := runeOffsetForCursor(text, cv.messageInput.CursorRow, cv.messageInput.CursorColumn)
+	newText, newPos := insertAtRuneOffset(text, s, pos)
 	cv.messageInput.SetText(newText)
-	cv.messageInput.CursorColumn = newPos
+	cv.messageInput.CursorRow, cv.messageInput.CursorColumn = cursorForRuneOffset(newText, newPos)
 	cv.window.Canvas().Focus(cv.messageInput)
 }
