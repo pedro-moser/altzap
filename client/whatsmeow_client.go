@@ -188,6 +188,7 @@ type WhatsAppClient struct {
 	OnMessageDelete   func(MessageDelete)                    // fires on "delete for everyone"
 	OnMessageStatus   func(MessageStatus)                    // fires when delivered/read receipt arrives
 	OnContactsUpdated func()                                 // fires after a background contact-cache refresh
+	OnChatMarkedRead  func(chatJID string)                   // fires when the chat was read on another device (phone)
 	muChannels        sync.RWMutex
 	// ContactCache holds *saved* address-book names (full/first only),
 	// owned exclusively by FetchContacts — safe to replace wholesale.
@@ -290,6 +291,14 @@ func NewWhatsAppClient(clientStore *sqlstore.Container, msgStore *MessageStore) 
 			wa.handleHistorySync(v)
 		case *events.Receipt:
 			wa.handleReceipt(v)
+		case *events.MarkChatAsRead:
+			// The phone (or another device) read this chat — its receipts
+			// supersede anything we'd send, so let the UI drop local unread
+			// state. The "marked as unread" direction is ignored: AltZap has
+			// no manual-unread concept yet.
+			if v.Action.GetRead() && wa.OnChatMarkedRead != nil {
+				wa.OnChatMarkedRead(v.JID.String())
+			}
 		}
 	})
 
@@ -1043,6 +1052,61 @@ func (w *WhatsAppClient) SendMessage(jid types.JID, text string, reply *ReplyTo,
 	}
 	w.persistOwn(saved)
 	return resp.ID, nil
+}
+
+// MarkTarget identifies one incoming message to acknowledge with a read
+// receipt. SenderJID matters in groups — WhatsApp requires receipts grouped
+// per message author.
+type MarkTarget struct {
+	ID        string
+	SenderJID string
+}
+
+// groupMarkTargets clusters targets by sender JID, preserving first-seen
+// order so receipt batches stay deterministic. Targets without an ID are
+// dropped. Pure helper, unit-tested.
+func groupMarkTargets(targets []MarkTarget) ([]string, map[string][]types.MessageID) {
+	order := make([]string, 0, 2)
+	bySender := make(map[string][]types.MessageID, 2)
+	for _, t := range targets {
+		if t.ID == "" {
+			continue
+		}
+		if _, ok := bySender[t.SenderJID]; !ok {
+			order = append(order, t.SenderJID)
+		}
+		bySender[t.SenderJID] = append(bySender[t.SenderJID], types.MessageID(t.ID))
+	}
+	return order, bySender
+}
+
+// MarkRead sends read receipts for incoming messages of chatJID — one
+// whatsmeow call per distinct sender (group-chat requirement). The account's
+// read-receipts privacy setting is honored by the library: with receipts
+// disabled the node downgrades to "read-self", which still clears the
+// phone's unread badge without blue-ticking the sender.
+func (w *WhatsAppClient) MarkRead(chatJID string, targets []MarkTarget) error {
+	if w.client == nil || !w.IsConnected() {
+		return fmt.Errorf("not connected to WhatsApp")
+	}
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return fmt.Errorf("parse chat jid %q: %w", chatJID, err)
+	}
+	order, bySender := groupMarkTargets(targets)
+	now := time.Now()
+	for _, senderStr := range order {
+		sender, err := types.ParseJID(senderStr)
+		if err != nil {
+			log.Printf("MarkRead: skip invalid sender %q: %v", senderStr, err)
+			continue
+		}
+		ids := bySender[senderStr]
+		if err := w.client.MarkRead(context.Background(), ids, now, chat, sender); err != nil {
+			return fmt.Errorf("mark %d msg(s) read in %s: %w", len(ids), chatJID, err)
+		}
+	}
+	return nil
 }
 
 // OwnJID returns the JID of the device this client is logged in as, or the

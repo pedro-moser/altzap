@@ -164,8 +164,12 @@ type ChatView struct {
 	muCachedChats      sync.RWMutex
 	recorder           recorder
 
-	unread          map[string]int // chat_jid -> unread count (in-memory)
-	muUnread        sync.RWMutex
+	unread   map[string]int // chat_jid -> unread count (in-memory)
+	muUnread sync.RWMutex
+	// pendingReads: incoming messages still owing a read receipt, keyed by
+	// the chat JID they arrived on. See chat_reads.go.
+	pendingReads    map[string][]client.MarkTarget
+	muPendingReads  sync.Mutex
 	notifyHook      func(senderName, chatName, preview string, isGroup bool) // optional, set by app
 	totalUnreadHook func(total int)                                          // optional, for tray tooltip
 	windowVisibleFn func() bool                                              // optional, set by app; nil = always visible
@@ -303,9 +307,20 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		window:        window,
 		messages:      make(map[string][]*Message),
 		unread:        make(map[string]int),
+		pendingReads:  make(map[string][]client.MarkTarget),
 		avatarFetched: make(map[string]bool),
 		bubbleHeights: make(map[string]float32),
 		stopCh:        make(chan struct{}),
+	}
+
+	// Phone read the chat → its receipts supersede anything still queued
+	// here; drop local unread state so the sidebar matches the phone.
+	cv.waClient.OnChatMarkedRead = func(chatJID string) {
+		cv.dropPendingReads(chatJID)
+		if cv.unreadFor(chatJID) > 0 {
+			cv.resetUnread(chatJID)
+			cv.refreshChats()
+		}
 	}
 
 	// Load contacts in the background; the staggered refresh loop below repaints
@@ -2159,6 +2174,7 @@ func (cv *ChatView) selectChatJID(jidStr string) {
 	cv.currentChatIsGroup = parsed.Server == types.GroupServer
 	cv.renderLimit = 0 // back to the default tail size for the new chat
 	cv.resetUnread(jidStr)
+	cv.flushPendingReads(jidStr)
 
 	cv.muMessages.Lock()
 	cv.messages[jidStr] = cv.loadMessagesFromDisk(jidStr)
@@ -2649,12 +2665,22 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	// Unread + notification: only when this chat isn't actually on screen
 	// (chat open AND window visible) and the message isn't from us. A chat
 	// "open" behind a tray-hidden window must still notify + count unread.
+	// On-screen incoming messages get their read receipt immediately; the
+	// rest stays queued until the chat becomes visible.
 	onScreen := (jidStr == cur || isSibling) && cv.isWindowVisible()
-	if !msg.Info.IsFromMe && !onScreen {
-		cv.incrementUnread(jidStr)
-		if cv.notifyHook != nil {
-			chatName := cv.waClient.LookupName(msg.Info.Chat)
-			cv.notifyHook(senderName, chatName, previewForMessage(newMsg), msg.Info.IsGroup)
+	if !msg.Info.IsFromMe {
+		cv.queuePendingRead(jidStr, client.MarkTarget{
+			ID:        msg.Info.ID,
+			SenderJID: msg.SenderJid.String(),
+		})
+		if onScreen {
+			cv.flushPendingReads(cur)
+		} else {
+			cv.incrementUnread(jidStr)
+			if cv.notifyHook != nil {
+				chatName := cv.waClient.LookupName(msg.Info.Chat)
+				cv.notifyHook(senderName, chatName, previewForMessage(newMsg), msg.Info.IsGroup)
+			}
 		}
 	}
 
@@ -2793,6 +2819,7 @@ func (cv *ChatView) OnWindowShown() {
 	if changed {
 		cv.refreshChats()
 	}
+	cv.flushPendingReads(cur)
 }
 
 // maybeFetchAvatar kicks off an async profile picture download for the given
