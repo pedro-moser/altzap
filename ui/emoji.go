@@ -82,23 +82,30 @@ func (cv *ChatView) showReactionPickerFor(msg *Message, anchor fyne.CanvasObject
 	})
 }
 
-// insertEmoji writes s into messageInput at the caret. Single-line entry,
-// so CursorColumn is the byte offset; for empty/zero-cursor cases SetText
-// + cursor restoration suffices.
+// insertAtRuneOffset inserts ins into s at rune index pos (clamped to the
+// string's bounds) and returns the new string plus the rune index just past
+// the insertion. Pure helper so the offset math is unit-testable.
+func insertAtRuneOffset(s, ins string, pos int) (string, int) {
+	runes := []rune(s)
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(runes) {
+		pos = len(runes)
+	}
+	out := string(runes[:pos]) + ins + string(runes[pos:])
+	return out, pos + len([]rune(ins))
+}
+
+// insertEmoji writes s into messageInput at the caret. Entry.CursorColumn
+// is a RUNE index (not a byte offset) — with accented text or emoji before
+// the caret, byte slicing would insert at the wrong spot or split a rune.
 func (cv *ChatView) insertEmoji(s string) {
 	if cv.messageInput == nil {
 		return
 	}
-	text := cv.messageInput.Text
-	pos := cv.messageInput.CursorColumn
-	if pos < 0 {
-		pos = 0
-	}
-	if pos > len(text) {
-		pos = len(text)
-	}
-	newText := text[:pos] + s + text[pos:]
+	newText, newPos := insertAtRuneOffset(cv.messageInput.Text, s, cv.messageInput.CursorColumn)
 	cv.messageInput.SetText(newText)
-	cv.messageInput.CursorColumn = pos + len(s)
+	cv.messageInput.CursorColumn = newPos
 	cv.window.Canvas().Focus(cv.messageInput)
 }
