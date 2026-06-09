@@ -4,6 +4,30 @@
 
 **Gerado em:** 2026-06-09, a partir de leitura completa da codebase (commit `e6a9fcd` + WIP não-commitado).
 
+## Status de execução (atualizado 2026-06-09)
+
+**Concluídas** (uma por commit, gates verdes):
+
+| Tarefa | Commit | |
+|--------|--------|---|
+| 0 — WIP de memória/foco commitado | `7109b4c` | ✅ |
+| A1 — truncate por runas | `bef5156` | ✅ |
+| A2 — insertEmoji por runas | `e9aa25e` | ✅ |
+| A4 — log de erro no HistorySync | `c39c60d` | ✅ |
+| A3 — notificação com janela na tray | `88fb057` | ✅ |
+| B1 — read receipts (MarkRead) | `68ec52c` | ✅ |
+| B9 — 🕓 até o ACK do envio | `66b71ee` | ✅ |
+| C2 — debounce de reload + cache de settings | `2ce7e3a` + `dbad3f4` | ✅ |
+| B5 — pin/mute do celular | `dbad3f4` | ✅ |
+| B2 — composer multi-linha | `0cd8156` | ✅ |
+| B6 — archive writeback | `844ba75` | ✅ |
+| D8 — auto-QR no login | `bbd139c` | ✅ |
+| B8 — chat por número | `5dda973` | ✅ |
+
+**Pendentes**, em ordem sugerida: C4 (split do chat_view.go — fazer antes de B3), B3a/b/c (menu de contexto + editar + apagar), B4 (typing), C5 (coalesce refreshMessages), C3 (decode assíncrono), C1 (paginação), B7 (vídeo), e o restante do Milestone D.
+
+> Validação manual recomendada pós-B1/B5/B6 (precisa de sessão real): badge do celular limpa ao abrir chat com não-lidas; fixados no topo; mutado não notifica; arquivar pelo menu ⋯ reflete no celular; Shift+Enter no composer; "💬 Conversar com +número" no novo chat.
+
 ---
 
 ## 0. Estado atual (snapshot)
@@ -178,14 +202,11 @@ Dividir em três commits:
 ## Ordem de execução recomendada
 
 ```
-0. Commitar/revisar o WIP do working tree
-A1 → A2 → A4 → A3            (4 commits pequenos de fix)
-B1 (read receipts)            ← maior impacto de paridade
-C4 (split do chat_view.go)    ← destrava paralelismo entre agentes
-B2 (multiline) ‖ B5+C2 (pin/mute+debounce)   ← paralelizáveis pós-C4
-B3a → B3b → B3c (menu/editar/apagar)
-B6 (archive writeback) → B9 (🕓) → B4 (typing) → B8 (chat por número)
-C5 → C3 → C1                  (perf: do mais barato pro estrutural)
+[✅ feitos] 0, A1–A4, B1, B9, C2, B5, B2, B6, D8, B8 — ver Status acima
+C4 (split do chat_view.go)    ← próximo: destrava paralelismo e o B3
+B3a → B3b → B3c (menu de contexto / editar / apagar p/ todos)
+B4 (typing) → C5 (coalesce refreshMessages)
+C3 (decode assíncrono) → C1 (paginação SQL)
 B7 (vídeo) e Milestone D conforme apetite
 ```
 
