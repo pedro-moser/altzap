@@ -193,6 +193,12 @@ type ChatView struct {
 	stopCh   chan struct{}
 	stopOnce sync.Once
 
+	// reloadTimer coalesces sidebar-reload requests (one per incoming
+	// message during a sync burst would otherwise mean one full
+	// loadChatList — chats × SQL roundtrips — per message).
+	reloadTimer   *time.Timer
+	muReloadTimer sync.Mutex
+
 	// Render-time limit for the open chat: 0 means default. Reset on chat
 	// switch; "Load older" bumps by renderChunk.
 	renderLimit int
@@ -503,7 +509,32 @@ func (cv *ChatView) Stop() {
 	if cv == nil {
 		return
 	}
-	cv.stopOnce.Do(func() { close(cv.stopCh) })
+	cv.stopOnce.Do(func() {
+		close(cv.stopCh)
+		cv.muReloadTimer.Lock()
+		if cv.reloadTimer != nil {
+			cv.reloadTimer.Stop()
+		}
+		cv.muReloadTimer.Unlock()
+	})
+}
+
+// ScheduleSidebarReload requests a chat-list reload, coalescing bursts into
+// a single loadChatList after a short quiet period. Runs the reload on the
+// timer goroutine, so it's safe to call from whatsmeow's event loop.
+func (cv *ChatView) ScheduleSidebarReload() {
+	if cv == nil {
+		return
+	}
+	cv.muReloadTimer.Lock()
+	defer cv.muReloadTimer.Unlock()
+	if cv.reloadTimer != nil {
+		cv.reloadTimer.Stop()
+	}
+	cv.reloadTimer = time.AfterFunc(250*time.Millisecond, func() {
+		cv.loadChatList()
+		cv.refreshChats()
+	})
 }
 
 func getInitials(name string) string {
@@ -2363,13 +2394,10 @@ func (cv *ChatView) appendStoredMessage(rec client.SavedMessage) {
 	}
 	cv.muMessages.Unlock()
 
-	cv.loadChatList()
+	cv.ScheduleSidebarReload()
 	fyne.Do(func() {
 		if (chatJID == cur || isSibling) && cv.messageList != nil {
 			cv.appendMessageBubble(msg)
-		}
-		if cv.chatList != nil {
-			cv.chatList.Refresh()
 		}
 	})
 }
@@ -2718,10 +2746,7 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 		}
 	})
 	// Refresh sidebar so new messages bump chats up the list.
-	go func() {
-		cv.loadChatList()
-		cv.refreshChats()
-	}()
+	cv.ScheduleSidebarReload()
 }
 
 // previewForMessage returns a short string suitable for sidebar previews and
