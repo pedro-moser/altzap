@@ -1172,31 +1172,31 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 	} else {
 		switch msg.MediaType {
 		case "image":
-			mc := buildImageBubble(msg, cv.window)
+			mc := cv.wrapBubbleGestures(msg, buildImageBubble(msg, cv.window))
 			parts = append(parts, mc)
 			if w := mc.MinSize().Width; w > naturalContentWidth {
 				naturalContentWidth = w
 			}
 		case "video":
-			mc := buildVideoBubble(msg, cv.window)
+			mc := cv.wrapBubbleGestures(msg, buildVideoBubble(msg, cv.window))
 			parts = append(parts, mc)
 			if w := mc.MinSize().Width; w > naturalContentWidth {
 				naturalContentWidth = w
 			}
 		case "audio", "voice":
-			mc := buildAudioBubble(msg)
+			mc := cv.wrapBubbleGestures(msg, buildAudioBubble(msg))
 			parts = append(parts, mc)
 			if w := mc.MinSize().Width; w > naturalContentWidth {
 				naturalContentWidth = w
 			}
 		case "document":
-			mc := buildDocBubble(msg)
+			mc := cv.wrapBubbleGestures(msg, buildDocBubble(msg))
 			parts = append(parts, mc)
 			if w := mc.MinSize().Width; w > naturalContentWidth {
 				naturalContentWidth = w
 			}
 		case "sticker":
-			mc := buildStickerBubble(msg)
+			mc := cv.wrapBubbleGestures(msg, buildStickerBubble(msg))
 			parts = append(parts, mc)
 			if w := mc.MinSize().Width; w > naturalContentWidth {
 				naturalContentWidth = w
@@ -1220,18 +1220,7 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 					wrap := textNatural+bubblePadding > maxBubbleWidth
 					body = buildMessageText(msg.Text, wrap)
 				}
-				if cv.window != nil && !msg.Deleted {
-					textCopy := msg.Text
-					replyTarget := msg
-					body = newClickableBubble(body,
-						func() {
-							if c := cv.window.Clipboard(); c != nil {
-								c.SetContent(textCopy)
-							}
-						},
-						func() { cv.beginReply(replyTarget) },
-					)
-				}
+				body = cv.wrapBubbleGestures(msg, body)
 				parts = append(parts, body)
 				if textNatural > naturalContentWidth {
 					naturalContentWidth = textNatural

@@ -22,15 +22,11 @@ var commonEmojis = []string{
 	"✅", "❌", "⭐", "💡", "📌", "👀",
 }
 
-// showEmojiPickerNear pops a 6-column grid of emojis above an anchor
-// widget. Click an emoji → onPick(emoji) + popup closes. ESC also closes
-// (registered on the global stack). Used both for inserting into the
-// message input and for adding reactions.
-func showEmojiPickerNear(c fyne.Canvas, anchor fyne.CanvasObject, onPick func(string)) {
-	if c == nil || anchor == nil {
-		return
-	}
-
+// newEmojiPickerPopup builds the 6-column emoji grid popup shared by the
+// anchor- and position-based variants. Click an emoji → onPick(emoji) +
+// popup closes. ESC also closes (registered on the global stack — plain
+// widget.PopUp doesn't take keyboard focus, unlike PopUpMenu).
+func newEmojiPickerPopup(c fyne.Canvas, onPick func(string)) *widget.PopUp {
 	var popup *widget.PopUp
 	var popEsc func()
 
@@ -56,12 +52,50 @@ func showEmojiPickerNear(c fyne.Canvas, anchor fyne.CanvasObject, onPick func(st
 	}
 
 	popup = widget.NewPopUp(container.NewPadded(grid), c)
+	popEsc = pushEsc(dismiss)
+	return popup
+}
+
+// showEmojiPickerNear pops the emoji grid above an anchor widget. Used both
+// for inserting into the message input and for the reactions "+" button.
+func showEmojiPickerNear(c fyne.Canvas, anchor fyne.CanvasObject, onPick func(string)) {
+	if c == nil || anchor == nil {
+		return
+	}
+	popup := newEmojiPickerPopup(c, onPick)
 	pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(anchor)
 	// Pop above the anchor so it floats out of the input strip / bubble
 	// rather than into it. 4px breathing room.
 	popup.ShowAtPosition(fyne.NewPos(pos.X, pos.Y-popup.MinSize().Height-4))
+}
 
-	popEsc = pushEsc(dismiss)
+// showEmojiPickerAt pops the emoji grid with its top-left at pos (canvas
+// coordinates, e.g. a right-click location), clamped to the canvas bounds —
+// plain PopUp, unlike PopUpMenu, doesn't clamp by itself.
+func showEmojiPickerAt(c fyne.Canvas, pos fyne.Position, onPick func(string)) {
+	if c == nil {
+		return
+	}
+	popup := newEmojiPickerPopup(c, onPick)
+	popup.ShowAtPosition(clampPopupPos(pos, popup.MinSize(), c.Size()))
+}
+
+// clampPopupPos keeps a popup of size min fully inside a canvas of size
+// bounds, preferring the top-left direction when it can't fit. Pure helper.
+func clampPopupPos(pos fyne.Position, min, bounds fyne.Size) fyne.Position {
+	if pos.X+min.Width > bounds.Width {
+		pos.X = bounds.Width - min.Width
+	}
+	if pos.Y+min.Height > bounds.Height {
+		pos.Y = bounds.Height - min.Height
+	}
+	if pos.X < 0 {
+		pos.X = 0
+	}
+	if pos.Y < 0 {
+		pos.Y = 0
+	}
+	return pos
 }
 
 // showEmojiPicker is the input-bar variant: inserts the chosen emoji
