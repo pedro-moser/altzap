@@ -1790,14 +1790,33 @@ func (w *WhatsAppClient) lookupPNForLID(lid types.JID) (types.JID, bool) {
 		return types.JID{}, false
 	}
 	pn, err := w.client.Store.LIDs.GetPNForLID(context.Background(), lid)
-	if err != nil || pn.IsEmpty() {
+	if err != nil {
+		// Transient DB error: don't cache, let the next call retry.
 		return types.JID{}, false
 	}
-
+	// Cache misses too (as the empty JID — the read path above treats it as
+	// "known unknown"): quote re-resolution runs on every bubble rebuild, and
+	// without a negative entry each render of an unmapped LID would hit
+	// SQLite again. dropNegativeLIDEntries re-opens these when fresh contact
+	// data lands.
 	w.muLIDs.Lock()
 	w.lidPNCache[lid.String()] = pn
 	w.muLIDs.Unlock()
-	return pn, true
+	return pn, !pn.IsEmpty()
+}
+
+// dropNegativeLIDEntries forgets cached "mapping unknown" answers so the
+// next lookup re-queries whatsmeow's lid_map. Called when fresh contact
+// data lands (FetchContacts), which is also when new LID↔PN mappings tend
+// to have arrived.
+func (w *WhatsAppClient) dropNegativeLIDEntries() {
+	w.muLIDs.Lock()
+	for k, v := range w.lidPNCache {
+		if v.IsEmpty() {
+			delete(w.lidPNCache, k)
+		}
+	}
+	w.muLIDs.Unlock()
 }
 
 // PhoneForJID returns the real phone number for a chat JID, or "" if it
@@ -1990,6 +2009,10 @@ func (w *WhatsAppClient) FetchContacts() {
 		log.Printf("FetchContacts: GetAllContacts failed: %v", err)
 		return
 	}
+
+	// Fresh contact data often arrives together with new LID↔PN mappings —
+	// give previously-unresolvable LIDs another shot at the lid_map.
+	w.dropNegativeLIDEntries()
 
 	// Build the new saved-name map and any DB-known network names outside the
 	// lock to keep the critical section short.

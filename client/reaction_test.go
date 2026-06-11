@@ -3,6 +3,8 @@ package client
 import (
 	"reflect"
 	"testing"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
 func TestMergeReaction(t *testing.T) {
@@ -97,5 +99,25 @@ func TestDedupeReactions(t *testing.T) {
 
 	if got := dedupeReactions(nil); len(got) != 0 {
 		t.Errorf("dedupeReactions(nil) = %+v, want empty", got)
+	}
+}
+
+func TestDropNegativeLIDEntries(t *testing.T) {
+	w := newTestClient()
+	pn, _ := types.ParseJID("5511999999999@s.whatsapp.net")
+	w.lidPNCache["resolved@lid"] = pn
+	w.lidPNCache["unknown1@lid"] = types.JID{}
+	w.lidPNCache["unknown2@lid"] = types.JID{}
+
+	w.dropNegativeLIDEntries()
+
+	if _, ok := w.lidPNCache["resolved@lid"]; !ok {
+		t.Error("positive entry must survive")
+	}
+	if _, ok := w.lidPNCache["unknown1@lid"]; ok {
+		t.Error("negative entry must be dropped")
+	}
+	if len(w.lidPNCache) != 1 {
+		t.Errorf("cache has %d entries, want 1", len(w.lidPNCache))
 	}
 }
