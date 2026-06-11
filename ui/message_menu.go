@@ -79,6 +79,10 @@ func (cv *ChatView) showMessageContextMenu(msg *Message, pos fyne.Position) {
 			edit.Disabled = !canEditMessage(msg, time.Now())
 			items = append(items, edit)
 		}
+		del := fyne.NewMenuItem("Delete for everyone", func() { cv.confirmDeleteForEveryone(msg) })
+		// A pending ID may not exist server-side yet.
+		del.Disabled = msg.Status == "pending"
+		items = append(items, del)
 	}
 
 	widget.NewPopUpMenu(fyne.NewMenu("", items...), c).ShowAtPosition(pos)

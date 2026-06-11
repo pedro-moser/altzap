@@ -71,3 +71,35 @@ func (cv *ChatView) showEditDialog(msg *Message) {
 	d.Show()
 	cv.window.Canvas().Focus(entry)
 }
+
+// confirmDeleteForEveryone asks before revoking one of our own messages —
+// irreversible and visible to the whole chat. The bubble flips to the
+// "deleted" placeholder via the client's local echo (OnMessageDelete).
+func (cv *ChatView) confirmDeleteForEveryone(msg *Message) {
+	if msg == nil || cv.window == nil || cv.currentChatJID == "" {
+		return
+	}
+	chatJID := cv.currentChatJID // capture: the dialog outlives chat switches
+
+	d := dialog.NewCustomConfirm("Delete message", "Delete for everyone", "Cancel",
+		widget.NewLabel("This message will be deleted for everyone in this chat."),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			chat, err := types.ParseJID(chatJID)
+			if err != nil {
+				return
+			}
+			go func() {
+				if err := cv.waClient.RevokeMessage(chat, msg.ID); err != nil {
+					fyne.Do(func() {
+						dialog.ShowError(fmt.Errorf("delete failed: %w", err), cv.window)
+					})
+				}
+			}()
+		},
+		cv.window,
+	)
+	d.Show()
+}

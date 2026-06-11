@@ -1402,6 +1402,29 @@ func (w *WhatsAppClient) EditMessage(chat types.JID, msgID, newText string) erro
 	return nil
 }
 
+// RevokeMessage deletes one of our own messages for everyone in the chat.
+// (Admin-revoking someone else's group message would pass their JID to
+// BuildRevoke instead — out of scope for now.) Same local-echo contract as
+// EditMessage: on success the deletion is persisted and OnMessageDelete
+// fires through the same pipeline incoming revokes use.
+func (w *WhatsAppClient) RevokeMessage(chat types.JID, msgID string) error {
+	if !w.IsConnected() {
+		return fmt.Errorf("not connected to WhatsApp")
+	}
+	msg := w.client.BuildRevoke(chat, types.EmptyJID, types.MessageID(msgID))
+	resp, err := w.client.SendMessage(context.Background(), chat, msg)
+	if err != nil {
+		return err
+	}
+	ts := resp.Timestamp.Unix()
+	if !w.applyRevoke(chat.String(), msgID, ts) {
+		if sib, ok := w.siblingChatJID(chat); ok {
+			w.applyRevoke(sib.String(), msgID, ts)
+		}
+	}
+	return nil
+}
+
 // persistOwn writes a freshly-sent record to the chat's JSONL. Tolerates
 // being called for the same ID twice (loadMessagesFromDisk dedupes by ID),
 // but normal flow only invokes once per send.
