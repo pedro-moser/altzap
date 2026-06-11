@@ -24,7 +24,20 @@
 | D8 — auto-QR no login | `bbd139c` | ✅ |
 | B8 — chat por número | `5dda973` | ✅ |
 
-**Pendentes**, em ordem sugerida: C4 (split do chat_view.go — fazer antes de B3), B3a/b/c (menu de contexto + editar + apagar), B4 (typing), C5 (coalesce refreshMessages), C3 (decode assíncrono), C1 (paginação), B7 (vídeo), e o restante do Milestone D.
+**Sessão 2026-06-10/11** (bugs reportados pelo Pedro + features):
+
+| Tarefa | Commit | |
+|--------|--------|---|
+| Fix: reação enviada não aparecia (echo local + sibling LID/PN no patch) | `b835365` | ✅ |
+| Fix: nome citado em grupo virava hash LID (re-resolução no render) | `c230fe4` | ✅ |
+| B3a — menu de contexto por bolha (Copy/Reply/React…/Forward…) | `a18f206` | ✅ |
+| Encaminhar mensagens (texto+mídia, picker com grupos, dedupe LID/PN) | `93cfa61` | ✅ |
+| Colar arquivos como anexo (text/uri-list; bônus: paste image/* além de png) | `729ccd1` | ✅ |
+| D11 — drag & drop de arquivos | `e109eeb` | ✅ |
+
+> Nota: `client/forward.go` já envia VideoMessage (re-upload) — B7 agora é só o picker/ffprobe do envio *novo* de vídeo.
+
+**Pendentes**, em ordem sugerida: C4 (split do chat_view.go — fazer antes de B3b/c), B3b/c (editar + apagar p/ todos no menu de contexto), B4 (typing), C5 (coalesce refreshMessages), C3 (decode assíncrono), C1 (paginação), B7 (vídeo), e o restante do Milestone D.
 
 > Validação manual recomendada pós-B1/B5/B6 (precisa de sessão real): badge do celular limpa ao abrir chat com não-lidas; fixados no topo; mutado não notifica; arquivar pelo menu ⋯ reflete no celular; Shift+Enter no composer; "💬 Conversar com +número" no novo chat.
 
@@ -202,9 +215,10 @@ Dividir em três commits:
 ## Ordem de execução recomendada
 
 ```
-[✅ feitos] 0, A1–A4, B1, B9, C2, B5, B2, B6, D8, B8 — ver Status acima
-C4 (split do chat_view.go)    ← próximo: destrava paralelismo e o B3
-B3a → B3b → B3c (menu de contexto / editar / apagar p/ todos)
+[✅ feitos] 0, A1–A4, B1, B9, C2, B5, B2, B6, D8, B8, B3a, D11,
+           reações(fix), quote-names(fix), forward, paste-arquivos — ver Status acima
+C4 (split do chat_view.go)    ← próximo: destrava paralelismo e o B3b/c
+B3b → B3c (editar / apagar p/ todos — itens novos no menu de contexto existente)
 B4 (typing) → C5 (coalesce refreshMessages)
 C3 (decode assíncrono) → C1 (paginação SQL)
 B7 (vídeo) e Milestone D conforme apetite
