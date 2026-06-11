@@ -31,8 +31,10 @@ import (
 // real Fyne app or subprocess.
 type pasteAwareEntry struct {
 	widget.Entry
-	tryImagePaste func() (string, error) // typically client.PasteImageFromClipboard
-	onImagePasted func(path string)      // called with the persisted tmp path
+	tryImagePaste func() (string, error)   // typically client.PasteImageFromClipboard
+	onImagePasted func(path string)        // called with the persisted tmp path
+	tryFilePaste  func() ([]string, error) // typically client.PasteFilesFromClipboard
+	onFilesPasted func(paths []string)     // file-manager copies; paths are the user's real files
 
 	// OnSendRequested fires on Enter without Shift. The composer is a
 	// multi-line Entry, so widget.Entry's OnSubmitted (single-line only)
@@ -71,6 +73,35 @@ func newPasteAwareEntry(tryImagePaste func() (string, error), onImagePasted func
 	e.Wrapping = fyne.TextWrapWord
 	e.ExtendBaseWidget(e)
 	return e
+}
+
+// SetFilePasteHandlers wires the file-list paste path (Ctrl+V after copying
+// files in a file manager — the clipboard offers text/uri-list instead of
+// image data). tryFilePaste defaults to client.PasteFilesFromClipboard when
+// nil; a nil onFilesPasted leaves the file path disabled.
+func (e *pasteAwareEntry) SetFilePasteHandlers(tryFilePaste func() ([]string, error), onFilesPasted func(paths []string)) {
+	if tryFilePaste == nil {
+		tryFilePaste = client.PasteFilesFromClipboard
+	}
+	e.tryFilePaste = tryFilePaste
+	e.onFilesPasted = onFilesPasted
+}
+
+// tryHandlePasteAsFiles mirrors tryHandlePasteAsImage for file lists.
+// Returns true when the clipboard held copied files and the callback fired.
+func (e *pasteAwareEntry) tryHandlePasteAsFiles(s fyne.Shortcut) bool {
+	if _, isPaste := s.(*fyne.ShortcutPaste); !isPaste {
+		return false
+	}
+	if e.onFilesPasted == nil || e.tryFilePaste == nil {
+		return false
+	}
+	paths, err := e.tryFilePaste()
+	if err != nil || len(paths) == 0 {
+		return false
+	}
+	e.onFilesPasted(paths)
+	return true
 }
 
 // tryHandlePasteAsImage runs the image-detection / callback step in
@@ -136,13 +167,22 @@ func (e *pasteAwareEntry) dispatchCustomShortcut(s fyne.Shortcut) bool {
 }
 
 // TypedShortcut overrides the embedded Entry's handler so we can:
-//  1. Treat Ctrl+V as image paste when the clipboard holds an image
-//     (else fall through to text paste).
-//  2. Run any mirrored CustomShortcut (Ctrl+J/K/F/R/L) that the
+//  1. Treat Ctrl+V as a file paste when the clipboard holds copied files
+//     (file managers offer text/uri-list).
+//  2. Else as an image paste when it holds image data.
+//  3. Run any mirrored CustomShortcut (Ctrl+J/K/F/R/L) that the
 //     embedded Entry would otherwise swallow silently.
+//
+// Files rank above image on purpose: a .png copied in the file manager
+// offers BOTH text/uri-list and image data, and should travel as the real
+// file (correct name, no tmp re-dump). Screenshots offer only image/*, so
+// the file probe fails fast and falls through.
 //
 // Anything else passes straight through to widget.Entry.
 func (e *pasteAwareEntry) TypedShortcut(s fyne.Shortcut) {
+	if e.tryHandlePasteAsFiles(s) {
+		return
+	}
 	if e.tryHandlePasteAsImage(s) {
 		return
 	}

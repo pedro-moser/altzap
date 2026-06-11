@@ -143,3 +143,68 @@ func TestEscAwareEntry_DispatchUnknownShortcutFallsThrough(t *testing.T) {
 		t.Fatal("unknown shortcut must fall through (return false)")
 	}
 }
+
+func TestPasteAwareEntry_FilePasteFiresCallback(t *testing.T) {
+	var got []string
+	e := newPasteAwareEntry(nil, nil)
+	e.SetFilePasteHandlers(
+		func() ([]string, error) { return []string{"/home/p/a.pdf", "/home/p/b.png"}, nil },
+		func(paths []string) { got = paths },
+	)
+
+	if !e.tryHandlePasteAsFiles(&fyne.ShortcutPaste{}) {
+		t.Fatal("file paste should have been claimed (returned true)")
+	}
+	if len(got) != 2 || got[0] != "/home/p/a.pdf" {
+		t.Fatalf("onFilesPasted got %v", got)
+	}
+}
+
+func TestPasteAwareEntry_NoFilesDoesNotConsumeShortcut(t *testing.T) {
+	calls := 0
+	e := newPasteAwareEntry(nil, nil)
+	e.SetFilePasteHandlers(
+		func() ([]string, error) { return nil, errors.New("clipboard holds no file list") },
+		func([]string) { calls++ },
+	)
+
+	if e.tryHandlePasteAsFiles(&fyne.ShortcutPaste{}) {
+		t.Fatal("paste with no files must not be claimed")
+	}
+	if calls != 0 {
+		t.Fatalf("file callback fired with empty clipboard, calls=%d", calls)
+	}
+}
+
+func TestPasteAwareEntry_NilFileHandlerIsDisabled(t *testing.T) {
+	e := newPasteAwareEntry(nil, nil)
+	// No SetFilePasteHandlers call at all:
+	if e.tryHandlePasteAsFiles(&fyne.ShortcutPaste{}) {
+		t.Fatal("file paste must be disabled when no handler is wired")
+	}
+	// Wired with nil callback:
+	e.SetFilePasteHandlers(func() ([]string, error) { return []string{"/x"}, nil }, nil)
+	if e.tryHandlePasteAsFiles(&fyne.ShortcutPaste{}) {
+		t.Fatal("file paste must stay disabled with a nil onFilesPasted")
+	}
+}
+
+func TestPasteAwareEntry_FilesTakePrecedenceOverImage(t *testing.T) {
+	// A .png copied in a file manager offers BOTH text/uri-list and image
+	// data; the file route must win so the real file (correct name) is sent.
+	imageCalls, fileCalls := 0, 0
+	e := newPasteAwareEntry(
+		func() (string, error) { return "/tmp/altzap-paste-fake.png", nil },
+		func(string) { imageCalls++ },
+	)
+	e.SetFilePasteHandlers(
+		func() ([]string, error) { return []string{"/home/p/photo.png"}, nil },
+		func([]string) { fileCalls++ },
+	)
+
+	e.TypedShortcut(&fyne.ShortcutPaste{})
+
+	if fileCalls != 1 || imageCalls != 0 {
+		t.Fatalf("want file route to claim the paste, got fileCalls=%d imageCalls=%d", fileCalls, imageCalls)
+	}
+}

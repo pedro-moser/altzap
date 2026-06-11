@@ -187,7 +187,7 @@ func (cv *ChatView) pickAndSend(kind attachKind) {
 
 	switch kind {
 	case attachImage:
-		picker.SetFilter(storage.NewExtensionFileFilter([]string{".png", ".jpg", ".jpeg", ".gif", ".webp"}))
+		picker.SetFilter(storage.NewExtensionFileFilter(imagePasteExts))
 	case attachAudio:
 		picker.SetFilter(storage.NewExtensionFileFilter([]string{".ogg", ".mp3", ".m4a", ".aac", ".opus", ".wav"}))
 	}
@@ -251,6 +251,82 @@ func (cv *ChatView) sendAttachment(jid types.JID, path string, kind attachKind, 
 		}
 		cv.appendStoredMessage(rec)
 	}()
+}
+
+// imagePasteExts mirrors the attach-menu image filter: extensions routed
+// through the image flow (preview dialog, ImageMessage) instead of going
+// out as documents.
+var imagePasteExts = []string{".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+func isImagePath(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	for _, e := range imagePasteExts {
+		if ext == e {
+			return true
+		}
+	}
+	return false
+}
+
+// confirmAndSendPastedFiles routes clipboard-pasted files: a single image
+// gets the existing preview+caption dialog; anything else (or multiple
+// files) gets a list confirmation first — an accidental Ctrl+V must never
+// fire an upload silently. The paths are the user's real files; nothing
+// here may delete them.
+func (cv *ChatView) confirmAndSendPastedFiles(jid types.JID, paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	if len(paths) == 1 && isImagePath(paths[0]) {
+		cv.confirmAndSendImage(jid, paths[0])
+		return
+	}
+
+	rows := make([]fyne.CanvasObject, 0, len(paths))
+	for _, p := range paths {
+		lbl := widget.NewLabel("📎 " + filepath.Base(p))
+		lbl.Truncation = fyne.TextTruncateEllipsis
+		rows = append(rows, lbl)
+	}
+	title := "Send file"
+	if len(paths) > 1 {
+		title = fmt.Sprintf("Send %d files", len(paths))
+	}
+	d := dialog.NewCustomConfirm(title, "Send", "Cancel",
+		container.NewVBox(rows...),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			go cv.sendPastedFiles(jid, paths)
+		},
+		cv.window,
+	)
+	d.Show()
+}
+
+// sendPastedFiles uploads the batch sequentially — one goroutine for all of
+// them, so the resulting bubbles keep the pasted order. Images keep their
+// image flow; everything else goes as a document (audio included: SendAudio
+// stamps an opus mimetype, which would lie about a pasted .mp3).
+func (cv *ChatView) sendPastedFiles(jid types.JID, paths []string) {
+	for _, p := range paths {
+		var (
+			rec     client.SavedMessage
+			sendErr error
+		)
+		if isImagePath(p) {
+			rec, sendErr = cv.waClient.SendImage(jid, p, "")
+		} else {
+			rec, sendErr = cv.waClient.SendFile(jid, p, filepath.Base(p))
+		}
+		if sendErr != nil {
+			err := sendErr
+			fyne.Do(func() { dialog.ShowError(err, cv.window) })
+			continue
+		}
+		cv.appendStoredMessage(rec)
+	}
 }
 
 // onMicClicked toggles voice recording. First click starts ffmpeg; second
@@ -372,6 +448,19 @@ func (cv *ChatView) inputBarBuild() fyne.CanvasObject {
 			return
 		}
 		cv.confirmAndSendImage(jid, path)
+	})
+	// File-manager copies (text/uri-list) paste as attachments. Unlike the
+	// image tmp file above, these paths are the user's real files — no
+	// os.Remove on any path here.
+	cv.messageInput.SetFilePasteHandlers(nil, func(paths []string) {
+		if cv.currentChatJID == "" {
+			return
+		}
+		jid, err := types.ParseJID(cv.currentChatJID)
+		if err != nil {
+			return
+		}
+		cv.confirmAndSendPastedFiles(jid, paths)
 	})
 	cv.messageInput.PlaceHolder = "Type a message"
 	cv.messageInput.OnSendRequested = cv.sendMessage

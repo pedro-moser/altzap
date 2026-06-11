@@ -3,7 +3,7 @@ package client
 import (
 	"errors"
 	"os"
-	"os/exec"
+	"strings"
 )
 
 // PasteImageFromClipboard reads an image from the system clipboard and
@@ -50,23 +50,38 @@ func pasteImageFromBytes(data []byte) (string, error) {
 	return f.Name(), nil
 }
 
-// detectClipboardImageReader picks the right command-line tool for the
-// current display server. Wayland gets wl-paste; everything else
-// (assumed X11) gets xclip. Results in a closure so callers don't have
-// to spawn a subprocess until they actually want to paste.
+// detectClipboardImageReader returns a closure that fetches the clipboard's
+// image payload, preferring image/png but falling back to whatever image/*
+// type is actually offered (browsers and some apps offer only image/jpeg
+// or image/webp). Listing types first also means "no image on clipboard"
+// fails fast without a doomed payload fetch.
 func detectClipboardImageReader() func() ([]byte, error) {
-	useWayland := os.Getenv("WAYLAND_DISPLAY") != ""
 	return func() ([]byte, error) {
-		var cmd *exec.Cmd
-		if useWayland {
-			cmd = exec.Command("wl-paste", "--type", "image/png", "--no-newline")
-		} else {
-			cmd = exec.Command("xclip", "-selection", "clipboard", "-t", "image/png", "-o")
-		}
-		out, err := cmd.Output()
+		types, err := clipboardMIMETypes()
 		if err != nil {
 			return nil, err
 		}
-		return out, nil
+		mime := pickImageMIME(types)
+		if mime == "" {
+			return nil, errors.New("clipboard contains no image")
+		}
+		return readClipboardType(mime)
 	}
+}
+
+// pickImageMIME chooses which offered MIME type to fetch as the pasted
+// image: image/png when available (lossless, the screenshot-tool default),
+// otherwise the first image/* entry. Empty when none qualifies. Pure.
+func pickImageMIME(types []string) string {
+	first := ""
+	for _, t := range types {
+		t = strings.TrimSpace(t)
+		if t == "image/png" {
+			return t
+		}
+		if first == "" && strings.HasPrefix(t, "image/") {
+			first = t
+		}
+	}
+	return first
 }
