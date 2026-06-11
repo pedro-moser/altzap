@@ -43,6 +43,7 @@ type Message struct {
 
 	// Reply / quote (optional)
 	ReplyToID         string
+	ReplyToSenderJID  string // quoted author's raw JID; lets the UI re-resolve stale names
 	ReplyToSenderName string
 	ReplyToText       string
 	ReplyToMediaType  string
@@ -1131,7 +1132,7 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 	naturalContentWidth := float32(0)
 
 	if !msg.Deleted {
-		if reply := buildReplyBox(msg); reply != nil {
+		if reply := buildReplyBox(msg, cv); reply != nil {
 			// Tap the quote preview to jump to the original message
 			// (mirrors WhatsApp's behavior). No-op when the original
 			// is outside the currently rendered window — Pedro can
@@ -2412,6 +2413,7 @@ func (cv *ChatView) messageFromRecord(sm client.SavedMessage) *Message {
 		Duration:          sm.Duration,
 		Thumb:             thumb,
 		ReplyToID:         sm.ReplyToID,
+		ReplyToSenderJID:  sm.ReplyToSenderJID,
 		ReplyToSenderName: sm.ReplyToSenderName,
 		ReplyToText:       sm.ReplyToText,
 		ReplyToMediaType:  sm.ReplyToMediaType,
@@ -2598,9 +2600,14 @@ func (cv *ChatView) sendMessage() {
 			// 1-1 fallback: the chat JID is the only other participant.
 			senderJID = cv.currentChatJID
 		}
+		quotedSender := rt.Sender
+		if rt.IsOwn {
+			quotedSender = "You"
+		}
 		reply = &client.ReplyTo{
 			MessageID:  rt.ID,
 			SenderJID:  senderJID,
+			SenderName: quotedSender,
 			QuotedText: previewForMessage(rt),
 		}
 	}
@@ -2628,12 +2635,9 @@ func (cv *ChatView) sendMessage() {
 		Status: "pending",
 	}
 	if rt != nil {
-		quotedSender := rt.Sender
-		if rt.IsOwn {
-			quotedSender = "You"
-		}
 		newMsg.ReplyToID = rt.ID
-		newMsg.ReplyToSenderName = quotedSender
+		newMsg.ReplyToSenderJID = reply.SenderJID
+		newMsg.ReplyToSenderName = reply.SenderName
 		newMsg.ReplyToText = previewForMessage(rt)
 		newMsg.ReplyToMediaType = rt.MediaType
 	}
@@ -2767,6 +2771,7 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 		Duration:          msg.Duration,
 		Thumb:             msg.Thumb,
 		ReplyToID:         msg.ReplyToID,
+		ReplyToSenderJID:  msg.ReplyToSenderJID,
 		ReplyToSenderName: msg.ReplyToSenderName,
 		ReplyToText:       msg.ReplyToText,
 		ReplyToMediaType:  msg.ReplyToMediaType,

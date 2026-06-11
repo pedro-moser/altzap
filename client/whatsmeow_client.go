@@ -1065,10 +1065,12 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 // ReplyTo describes the message a new outgoing message is quoting.
 // Used by SendMessage when reply != nil. SenderJID is best-effort —
 // WhatsApp will still render the quote without it for 1-1 chats, but
-// groups expect Participant.
+// groups expect Participant. SenderName is the display name persisted
+// alongside the record so the quote header survives a restart.
 type ReplyTo struct {
 	MessageID  string
 	SenderJID  string
+	SenderName string
 	QuotedText string
 }
 
@@ -1136,6 +1138,7 @@ func (w *WhatsAppClient) SendMessage(jid types.JID, text string, reply *ReplyTo,
 	if reply != nil {
 		saved.ReplyToID = reply.MessageID
 		saved.ReplyToSenderJID = reply.SenderJID
+		saved.ReplyToSenderName = reply.SenderName
 		saved.ReplyToText = reply.QuotedText
 	}
 	w.persistOwn(saved)
@@ -1616,6 +1619,9 @@ func (w *WhatsAppClient) cachedPushName(jid types.JID) string {
 // the live pushName) and LookupName (called with "") converge once the push
 // name is cached — which is what fixes the old two-resolvers inconsistency.
 func (w *WhatsAppClient) resolveDisplayName(jid types.JID, pushName string) string {
+	// All caches key by device-less JIDs; events can carry AD JIDs
+	// ("<user>:<device>@server"), which would silently miss every map.
+	jid = jid.ToNonAD()
 	jidStr := jid.String()
 
 	if jid.Server == types.GroupServer {
@@ -1671,7 +1677,7 @@ func (w *WhatsAppClient) rememberPushName(jid types.JID, pushName string) {
 		return
 	}
 	w.muContacts.Lock()
-	w.pushNameCache[jid.String()] = pushName
+	w.pushNameCache[jid.ToNonAD().String()] = pushName
 	w.muContacts.Unlock()
 }
 
@@ -1683,7 +1689,7 @@ func (w *WhatsAppClient) rememberBusinessName(jid types.JID, businessName string
 		return
 	}
 	w.muContacts.Lock()
-	w.pushNameCache[jid.String()] = businessName
+	w.pushNameCache[jid.ToNonAD().String()] = businessName
 	w.muContacts.Unlock()
 }
 

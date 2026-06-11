@@ -11,17 +11,72 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"go.mau.fi/whatsmeow/types"
 )
+
+// isHumanName reports whether s reads like an actual display name rather
+// than a bare phone number or LID hash — i.e., it contains at least one rune
+// outside the digits-and-phone-punctuation alphabet.
+func isHumanName(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r == '+', r == ' ', r == '-', r == '(', r == ')', r == '.':
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// quotedSenderDisplay picks the name shown for a quote's author. stored is
+// the name resolved (and frozen) at ingest time; jidStr the author's raw
+// JID. A human-readable stored name wins; numeric leftovers — the LID hash
+// that history sync froze before contact/LID mappings finished syncing, or
+// a bare phone — are re-resolved through lookup at render time, which keeps
+// improving as mappings land. Pure helper, unit-tested.
+func quotedSenderDisplay(stored, jidStr string, lookup func(types.JID) string) string {
+	if isHumanName(stored) {
+		return stored
+	}
+	if jidStr == "" || lookup == nil {
+		return stored
+	}
+	jid, err := types.ParseJID(jidStr)
+	if err != nil {
+		return stored
+	}
+	resolved := lookup(jid)
+	if isHumanName(resolved) {
+		return resolved
+	}
+	// Both numeric: a resolved phone number (LID→PN mapping landed) beats
+	// the raw hash, but never downgrade an existing phone back to a hash.
+	if resolved != "" && resolved != jid.User {
+		return resolved
+	}
+	if stored != "" {
+		return stored
+	}
+	if jid.Server != types.HiddenUserServer {
+		return resolved // a bare phone number is still informative
+	}
+	return "" // a LID hash is meaningless noise — caller shows "Someone"
+}
 
 // buildReplyBox renders a small framed area shown above a bubble's content
 // when this message is a reply. Mirrors WhatsApp's "quoted preview" — colored
 // left bar, sender name in the bar's color, then a one-line preview.
-func buildReplyBox(msg *Message) fyne.CanvasObject {
+// cv may be nil in tests; it's only used to re-resolve stale quoted names.
+func buildReplyBox(msg *Message, cv *ChatView) fyne.CanvasObject {
 	if msg.ReplyToID == "" {
 		return nil
 	}
 
 	senderName := msg.ReplyToSenderName
+	if cv != nil && cv.waClient != nil {
+		senderName = quotedSenderDisplay(senderName, msg.ReplyToSenderJID, cv.waClient.LookupName)
+	}
 	if senderName == "" {
 		senderName = "Someone"
 	}
