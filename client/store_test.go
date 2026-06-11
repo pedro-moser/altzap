@@ -1,6 +1,7 @@
 package client
 
 import (
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -62,6 +63,133 @@ func TestOpenMessageStore_CreatesSchema(t *testing.T) {
 	}
 }
 
+// legacySchemaSQL is the messages schema as it shipped before the
+// forwarded/gif_playback columns existed — used to simulate a production
+// database that predates the first ALTER TABLE migration.
+const legacySchemaSQL = `
+CREATE TABLE IF NOT EXISTS messages (
+    chat_jid          TEXT    NOT NULL,
+    id                TEXT    NOT NULL,
+    sender_jid        TEXT    NOT NULL DEFAULT '',
+    sender_name       TEXT    NOT NULL DEFAULT '',
+    text              TEXT    NOT NULL DEFAULT '',
+    ts                INTEGER NOT NULL,
+    from_me           INTEGER NOT NULL DEFAULT 0,
+    media_type        TEXT    NOT NULL DEFAULT '',
+    media_path        TEXT    NOT NULL DEFAULT '',
+    mimetype          TEXT    NOT NULL DEFAULT '',
+    filename          TEXT    NOT NULL DEFAULT '',
+    file_size         INTEGER NOT NULL DEFAULT 0,
+    width             INTEGER NOT NULL DEFAULT 0,
+    height            INTEGER NOT NULL DEFAULT 0,
+    duration          INTEGER NOT NULL DEFAULT 0,
+    thumb_b64         TEXT    NOT NULL DEFAULT '',
+    reply_to_id            TEXT NOT NULL DEFAULT '',
+    reply_to_sender_jid    TEXT NOT NULL DEFAULT '',
+    reply_to_sender_name   TEXT NOT NULL DEFAULT '',
+    reply_to_text          TEXT NOT NULL DEFAULT '',
+    reply_to_media_type    TEXT NOT NULL DEFAULT '',
+    reactions_json    TEXT    NOT NULL DEFAULT '[]',
+    edited            INTEGER NOT NULL DEFAULT 0,
+    edited_at         INTEGER NOT NULL DEFAULT 0,
+    deleted           INTEGER NOT NULL DEFAULT 0,
+    deleted_at        INTEGER NOT NULL DEFAULT 0,
+    status            TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (chat_jid, id)
+);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_jid, ts);
+`
+
+func TestMigrateSchema_AddsColumnsPreservingData(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "messages.db")
+
+	// Seed a database with the pre-migration schema and one raw row.
+	raw, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := raw.Exec(legacySchemaSQL); err != nil {
+		t.Fatalf("apply legacy schema: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO messages (chat_jid, id, text, ts, from_me) VALUES (?, ?, ?, ?, 1)`,
+		"chat@s.whatsapp.net", "OLD1", "antiga", 1700000000,
+	); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	// Opening through the store must run the migration.
+	s, err := OpenMessageStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenMessageStore (migrating): %v", err)
+	}
+
+	cols := map[string]bool{}
+	rows, err := s.db.Query(`PRAGMA table_info(messages)`)
+	if err != nil {
+		t.Fatalf("table_info: %v", err)
+	}
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		cols[name] = true
+	}
+	rows.Close()
+	for _, m := range columnMigrations {
+		if !cols[m.name] {
+			t.Errorf("column %q missing after migration", m.name)
+		}
+	}
+
+	// Legacy data must survive with the new fields zeroed.
+	got, ok, err := s.LoadMessage("chat@s.whatsapp.net", "OLD1")
+	if err != nil || !ok {
+		t.Fatalf("LoadMessage after migration: ok=%v err=%v", ok, err)
+	}
+	if got.Text != "antiga" || !got.FromMe || got.Forwarded || got.GifPlayback {
+		t.Errorf("legacy row mangled: %+v", got)
+	}
+
+	// And the new columns must round-trip through Insert and Patch.
+	rec := SavedMessage{ChatJID: "chat@s.whatsapp.net", ID: "NEW1", Text: "nova",
+		Timestamp: 1700000001, Forwarded: true, GifPlayback: true}
+	if err := s.Insert(rec); err != nil {
+		t.Fatalf("Insert post-migration: %v", err)
+	}
+	if err := s.Patch(rec.ChatJID, rec.ID, func(r *SavedMessage) bool {
+		r.Status = "read"
+		return true
+	}); err != nil {
+		t.Fatalf("Patch post-migration: %v", err)
+	}
+	got2, _, err := s.LoadMessage(rec.ChatJID, rec.ID)
+	if err != nil {
+		t.Fatalf("LoadMessage NEW1: %v", err)
+	}
+	if !got2.Forwarded || !got2.GifPlayback || got2.Status != "read" {
+		t.Errorf("Patch must not wipe migrated columns: %+v", got2)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Idempotence: a second open re-runs migrateSchema as a no-op.
+	s2, err := OpenMessageStore(dbPath)
+	if err != nil {
+		t.Fatalf("re-open after migration: %v", err)
+	}
+	defer s2.Close()
+}
+
 func TestInsertAndLoadChat_Roundtrip(t *testing.T) {
 	s := openTestStore(t)
 	rec := SavedMessage{
@@ -89,11 +217,13 @@ func TestInsertAndLoadChat_Roundtrip(t *testing.T) {
 		Reactions: []SavedReaction{
 			{Emoji: "❤️", SenderJID: "carol@s.whatsapp.net", SenderName: "Carol", Timestamp: 1700000005},
 		},
-		Edited:    false,
-		EditedAt:  0,
-		Deleted:   false,
-		DeletedAt: 0,
-		Status:    "",
+		Edited:      false,
+		EditedAt:    0,
+		Deleted:     false,
+		DeletedAt:   0,
+		Status:      "",
+		Forwarded:   true,
+		GifPlayback: true,
 	}
 
 	if err := s.Insert(rec); err != nil {

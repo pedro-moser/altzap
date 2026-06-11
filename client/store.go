@@ -37,10 +37,56 @@ CREATE TABLE IF NOT EXISTS messages (
     deleted           INTEGER NOT NULL DEFAULT 0,
     deleted_at        INTEGER NOT NULL DEFAULT 0,
     status            TEXT    NOT NULL DEFAULT '',
+    forwarded         INTEGER NOT NULL DEFAULT 0,
+    gif_playback      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chat_jid, id)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_jid, ts);
 `
+
+// columnMigrations lists columns added after the original schema shipped.
+// CREATE TABLE IF NOT EXISTS never alters an existing table, so databases
+// created before a column existed get it through ALTER TABLE here. ADD
+// COLUMN with a constant DEFAULT is instantaneous in SQLite (no rewrite).
+// Pure data, table-tested.
+var columnMigrations = []struct{ name, ddl string }{
+	{"forwarded", `ALTER TABLE messages ADD COLUMN forwarded INTEGER NOT NULL DEFAULT 0`},
+	{"gif_playback", `ALTER TABLE messages ADD COLUMN gif_playback INTEGER NOT NULL DEFAULT 0`},
+}
+
+// migrateSchema brings an existing messages table up to the current column
+// set. Idempotent: PRAGMA table_info tells us what's already there.
+func migrateSchema(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(messages)`)
+	if err != nil {
+		return fmt.Errorf("table_info: %w", err)
+	}
+	existing := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		existing[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, m := range columnMigrations {
+		if existing[m.name] {
+			continue
+		}
+		if _, err := db.Exec(m.ddl); err != nil {
+			return fmt.Errorf("add column %s: %w", m.name, err)
+		}
+	}
+	return nil
+}
 
 // MessageStore persists chat messages in a SQLite database.
 // Replaces the previous per-chat JSONL append-only files. WAL is enabled
@@ -68,6 +114,10 @@ func OpenMessageStore(path string) (*MessageStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrateSchema(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 	return &MessageStore{db: db}, nil
 }
 
@@ -79,13 +129,13 @@ const insertSQL = `INSERT OR IGNORE INTO messages (
     chat_jid, id, sender_jid, sender_name, text, ts, from_me,
     media_type, media_path, mimetype, filename, file_size, width, height, duration, thumb_b64,
     reply_to_id, reply_to_sender_jid, reply_to_sender_name, reply_to_text, reply_to_media_type,
-    reactions_json, edited, edited_at, deleted, deleted_at, status
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    reactions_json, edited, edited_at, deleted, deleted_at, status, forwarded, gif_playback
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 const selectChatSQL = `SELECT chat_jid, id, sender_jid, sender_name, text, ts, from_me,
     media_type, media_path, mimetype, filename, file_size, width, height, duration, thumb_b64,
     reply_to_id, reply_to_sender_jid, reply_to_sender_name, reply_to_text, reply_to_media_type,
-    reactions_json, edited, edited_at, deleted, deleted_at, status
+    reactions_json, edited, edited_at, deleted, deleted_at, status, forwarded, gif_playback
     FROM messages WHERE chat_jid = ? ORDER BY ts ASC`
 
 // execer is implemented by both *sql.DB and *sql.Tx — lets us share the
@@ -124,6 +174,7 @@ func insertOne(e execer, r SavedMessage) error {
 		r.MediaType, r.MediaPath, r.Mimetype, r.FileName, r.FileSize, r.Width, r.Height, r.Duration, r.ThumbB64,
 		r.ReplyToID, r.ReplyToSenderJID, r.ReplyToSenderName, r.ReplyToText, r.ReplyToMediaType,
 		rj, boolToInt(r.Edited), r.EditedAt, boolToInt(r.Deleted), r.DeletedAt, r.Status,
+		boolToInt(r.Forwarded), boolToInt(r.GifPlayback),
 	)
 	return err
 }
@@ -139,19 +190,21 @@ func scanMessage(scanner interface {
 	Scan(dest ...interface{}) error
 }) (SavedMessage, error) {
 	var r SavedMessage
-	var fromMe, edited, deleted int
+	var fromMe, edited, deleted, forwarded, gifPlayback int
 	var rj string
 	if err := scanner.Scan(
 		&r.ChatJID, &r.ID, &r.SenderJID, &r.SenderName, &r.Text, &r.Timestamp, &fromMe,
 		&r.MediaType, &r.MediaPath, &r.Mimetype, &r.FileName, &r.FileSize, &r.Width, &r.Height, &r.Duration, &r.ThumbB64,
 		&r.ReplyToID, &r.ReplyToSenderJID, &r.ReplyToSenderName, &r.ReplyToText, &r.ReplyToMediaType,
-		&rj, &edited, &r.EditedAt, &deleted, &r.DeletedAt, &r.Status,
+		&rj, &edited, &r.EditedAt, &deleted, &r.DeletedAt, &r.Status, &forwarded, &gifPlayback,
 	); err != nil {
 		return SavedMessage{}, err
 	}
 	r.FromMe = fromMe != 0
 	r.Edited = edited != 0
 	r.Deleted = deleted != 0
+	r.Forwarded = forwarded != 0
+	r.GifPlayback = gifPlayback != 0
 	if rj != "" && rj != "[]" {
 		if err := json.Unmarshal([]byte(rj), &r.Reactions); err != nil {
 			return SavedMessage{}, fmt.Errorf("unmarshal reactions for msg %s: %w", r.ID, err)
@@ -201,7 +254,7 @@ func (s *MessageStore) LoadChat(chatJID string) ([]SavedMessage, error) {
 const selectOneSQL = `SELECT chat_jid, id, sender_jid, sender_name, text, ts, from_me,
     media_type, media_path, mimetype, filename, file_size, width, height, duration, thumb_b64,
     reply_to_id, reply_to_sender_jid, reply_to_sender_name, reply_to_text, reply_to_media_type,
-    reactions_json, edited, edited_at, deleted, deleted_at, status
+    reactions_json, edited, edited_at, deleted, deleted_at, status, forwarded, gif_playback
     FROM messages WHERE chat_jid = ? AND id = ?`
 
 // LoadMessage returns a single persisted message. ok=false means the record
@@ -221,7 +274,8 @@ const updateSQL = `UPDATE messages SET
     sender_jid = ?, sender_name = ?, text = ?, ts = ?, from_me = ?,
     media_type = ?, media_path = ?, mimetype = ?, filename = ?, file_size = ?, width = ?, height = ?, duration = ?, thumb_b64 = ?,
     reply_to_id = ?, reply_to_sender_jid = ?, reply_to_sender_name = ?, reply_to_text = ?, reply_to_media_type = ?,
-    reactions_json = ?, edited = ?, edited_at = ?, deleted = ?, deleted_at = ?, status = ?
+    reactions_json = ?, edited = ?, edited_at = ?, deleted = ?, deleted_at = ?, status = ?,
+    forwarded = ?, gif_playback = ?
     WHERE chat_jid = ? AND id = ?`
 
 // Patch loads the record matching (chatJID, msgID), passes it to fn,
@@ -256,6 +310,7 @@ func (s *MessageStore) Patch(chatJID, msgID string, fn func(*SavedMessage) bool)
 		rec.MediaType, rec.MediaPath, rec.Mimetype, rec.FileName, rec.FileSize, rec.Width, rec.Height, rec.Duration, rec.ThumbB64,
 		rec.ReplyToID, rec.ReplyToSenderJID, rec.ReplyToSenderName, rec.ReplyToText, rec.ReplyToMediaType,
 		rj, boolToInt(rec.Edited), rec.EditedAt, boolToInt(rec.Deleted), rec.DeletedAt, rec.Status,
+		boolToInt(rec.Forwarded), boolToInt(rec.GifPlayback),
 		chatJID, msgID,
 	); err != nil {
 		return err

@@ -55,6 +55,12 @@ type SavedMessage struct {
 	Duration  uint32 `json:"duration,omitempty"`  // seconds
 	ThumbB64  string `json:"thumb_b64,omitempty"` // JPEGThumbnail base64 for instant preview
 
+	// Forwarded mirrors ContextInfo.IsForwarded (the "Forwarded" tag);
+	// GifPlayback marks a VideoMessage that official clients render as a
+	// looping GIF rather than a regular video.
+	Forwarded   bool `json:"forwarded,omitempty"`
+	GifPlayback bool `json:"gif_playback,omitempty"`
+
 	// Reply / quote (optional). Non-empty ReplyToID = this message quotes another.
 	ReplyToID         string `json:"reply_to_id,omitempty"`
 	ReplyToSenderJID  string `json:"reply_to_sender_jid,omitempty"`
