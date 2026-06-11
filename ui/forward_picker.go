@@ -108,16 +108,17 @@ func filterForwardCandidates(all []forwardCandidate, query string) []forwardCand
 // forwardSource snapshots the fields ForwardMessage needs from a UI message.
 func forwardSource(msg *Message) client.SavedMessage {
 	src := client.SavedMessage{
-		ID:        msg.ID,
-		Text:      msg.Text,
-		MediaType: msg.MediaType,
-		MediaPath: msg.MediaPath,
-		Mimetype:  msg.Mimetype,
-		FileName:  msg.FileName,
-		FileSize:  msg.FileSize,
-		Width:     msg.Width,
-		Height:    msg.Height,
-		Duration:  msg.Duration,
+		ID:          msg.ID,
+		Text:        msg.Text,
+		MediaType:   msg.MediaType,
+		MediaPath:   msg.MediaPath,
+		Mimetype:    msg.Mimetype,
+		FileName:    msg.FileName,
+		FileSize:    msg.FileSize,
+		Width:       msg.Width,
+		Height:      msg.Height,
+		Duration:    msg.Duration,
+		GifPlayback: msg.GifPlayback,
 	}
 	if len(msg.Thumb) > 0 {
 		src.ThumbB64 = base64.StdEncoding.EncodeToString(msg.Thumb)

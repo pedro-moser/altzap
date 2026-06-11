@@ -104,6 +104,11 @@ type MessageEvent struct {
 	Duration  uint32
 	Thumb     []byte // raw JPEGThumbnail bytes
 
+	// Forwarded mirrors ContextInfo.IsForwarded; GifPlayback marks a
+	// VideoMessage rendered as a looping GIF by official clients.
+	Forwarded   bool
+	GifPlayback bool
+
 	// Reply / quote (optional)
 	ReplyToID         string
 	ReplyToSenderJID  string
@@ -536,7 +541,8 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 	if text == "" && mediaType == "" {
 		return
 	}
-	rid, rsenderJID, _, rtext, rmediaType := extractReply(extractContext(msg.Message))
+	ctx := extractContext(msg.Message)
+	rid, rsenderJID, _, rtext, rmediaType := extractReply(ctx)
 	rsenderName := ""
 	if rsenderJID != "" {
 		if jid, err := types.ParseJID(rsenderJID); err == nil {
@@ -560,6 +566,8 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 		Height:            mh,
 		Duration:          dur,
 		Thumb:             thumb,
+		Forwarded:         ctx.GetIsForwarded(),
+		GifPlayback:       msg.Message.GetVideoMessage().GetGifPlayback(),
 		ReplyToID:         rid,
 		ReplyToSenderJID:  rsenderJID,
 		ReplyToSenderName: rsenderName,
@@ -569,8 +577,7 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 
 	w.seedChatRegistry(msg.Info.Chat.String(), msg.Info.IsGroup, senderName)
 
-	w.persistIncoming(msg, mediaType, mime, fileName, size, mw, mh, dur, thumb, text, senderName,
-		rid, rsenderJID, rsenderName, rtext, rmediaType)
+	w.persistIncoming(msg, messageEvent)
 
 	if w.OnMessage != nil {
 		w.OnMessage(messageEvent)
@@ -890,33 +897,35 @@ func (w *WhatsAppClient) siblingChatJID(chat types.JID) (types.JID, bool) {
 
 // persistIncoming writes a SavedMessage record for a freshly-arrived event.
 // MediaPath stays empty until downloadAndPatch fills it asynchronously.
-func (w *WhatsAppClient) persistIncoming(msg *events.Message, mediaType, mime, fileName string, size uint64, width, height, duration uint32, thumb []byte, text, senderName, replyToID, replyToSenderJID, replyToSenderName, replyToText, replyToMediaType string) {
-	if text == "" && mediaType == "" {
+func (w *WhatsAppClient) persistIncoming(msg *events.Message, evt MessageEvent) {
+	if evt.Text == "" && evt.MediaType == "" {
 		return
 	}
 	rec := SavedMessage{
 		ID:                msg.Info.ID,
 		ChatJID:           msg.Info.Chat.String(),
 		SenderJID:         msg.Info.Sender.String(),
-		SenderName:        senderName,
-		Text:              text,
+		SenderName:        evt.SenderName,
+		Text:              evt.Text,
 		Timestamp:         msg.Info.Timestamp.Unix(),
 		FromMe:            msg.Info.IsFromMe,
-		MediaType:         mediaType,
-		Mimetype:          mime,
-		FileName:          fileName,
-		FileSize:          size,
-		Width:             width,
-		Height:            height,
-		Duration:          duration,
-		ReplyToID:         replyToID,
-		ReplyToSenderJID:  replyToSenderJID,
-		ReplyToSenderName: replyToSenderName,
-		ReplyToText:       replyToText,
-		ReplyToMediaType:  replyToMediaType,
+		MediaType:         evt.MediaType,
+		Mimetype:          evt.Mimetype,
+		FileName:          evt.FileName,
+		FileSize:          evt.FileSize,
+		Width:             evt.Width,
+		Height:            evt.Height,
+		Duration:          evt.Duration,
+		Forwarded:         evt.Forwarded,
+		GifPlayback:       evt.GifPlayback,
+		ReplyToID:         evt.ReplyToID,
+		ReplyToSenderJID:  evt.ReplyToSenderJID,
+		ReplyToSenderName: evt.ReplyToSenderName,
+		ReplyToText:       evt.ReplyToText,
+		ReplyToMediaType:  evt.ReplyToMediaType,
 	}
-	if len(thumb) > 0 {
-		rec.ThumbB64 = base64.StdEncoding.EncodeToString(thumb)
+	if len(evt.Thumb) > 0 {
+		rec.ThumbB64 = base64.StdEncoding.EncodeToString(evt.Thumb)
 	}
 	if err := w.msgStore.InsertBatch([]SavedMessage{rec}); err != nil {
 		log.Printf("persistIncoming: %v", err)
@@ -1067,7 +1076,8 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 				senderName = w.resolveDisplayName(senderJID, pushName)
 			}
 
-			rid, rsenderJID, _, rtext, rmediaType := extractReply(extractContext(body))
+			bctx := extractContext(body)
+			rid, rsenderJID, _, rtext, rmediaType := extractReply(bctx)
 			rsenderName := ""
 			if rsenderJID != "" {
 				if rsj, err := types.ParseJID(rsenderJID); err == nil {
@@ -1090,6 +1100,8 @@ func (w *WhatsAppClient) handleHistorySync(evt *events.HistorySync) {
 				Width:             mw,
 				Height:            mh,
 				Duration:          dur,
+				Forwarded:         bctx.GetIsForwarded(),
+				GifPlayback:       body.GetVideoMessage().GetGifPlayback(),
 				ReplyToID:         rid,
 				ReplyToSenderJID:  rsenderJID,
 				ReplyToSenderName: rsenderName,

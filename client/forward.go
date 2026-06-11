@@ -67,6 +67,7 @@ func (w *WhatsAppClient) forwardText(dst types.JID, text string) (SavedMessage, 
 		Text:      text,
 		Timestamp: resp.Timestamp.Unix(),
 		FromMe:    true,
+		Forwarded: true,
 	})
 }
 
@@ -94,20 +95,22 @@ func (w *WhatsAppClient) forwardMedia(dst types.JID, src SavedMessage) (SavedMes
 	}
 
 	return w.finishOutgoing(SavedMessage{
-		ID:        resp.ID,
-		ChatJID:   dst.String(),
-		Text:      src.Text, // caption travels with the media
-		Timestamp: resp.Timestamp.Unix(),
-		FromMe:    true,
-		MediaType: src.MediaType,
-		MediaPath: stashOutgoingMedia(absPath, dst.String(), resp.ID, mime),
-		Mimetype:  mime,
-		FileName:  src.FileName,
-		FileSize:  uint64(len(data)),
-		Width:     src.Width,
-		Height:    src.Height,
-		Duration:  src.Duration,
-		ThumbB64:  src.ThumbB64,
+		ID:          resp.ID,
+		ChatJID:     dst.String(),
+		Text:        src.Text, // caption travels with the media
+		Timestamp:   resp.Timestamp.Unix(),
+		FromMe:      true,
+		MediaType:   src.MediaType,
+		MediaPath:   stashOutgoingMedia(absPath, dst.String(), resp.ID, mime),
+		Mimetype:    mime,
+		FileName:    src.FileName,
+		FileSize:    uint64(len(data)),
+		Width:       src.Width,
+		Height:      src.Height,
+		Duration:    src.Duration,
+		ThumbB64:    src.ThumbB64,
+		Forwarded:   true,
+		GifPlayback: src.GifPlayback,
 	})
 }
 
@@ -178,6 +181,11 @@ func (w *WhatsAppClient) buildForwardedMedia(src SavedMessage, data []byte) (*wa
 		}
 		if len(srcThumb) > 0 {
 			vm.JPEGThumbnail = srcThumb
+		}
+		if src.GifPlayback {
+			// GIFs are VideoMessages with this flag — without it the
+			// recipient gets a regular video instead of a looping GIF.
+			vm.GifPlayback = proto.Bool(true)
 		}
 		return &waE2E.Message{VideoMessage: vm}, mime, nil
 

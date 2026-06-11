@@ -41,6 +41,11 @@ type Message struct {
 	Duration  uint32
 	Thumb     []byte // raw JPEGThumbnail bytes for instant preview
 
+	// Forwarded renders the "↪ Forwarded" tag; GifPlayback marks a video
+	// that official clients loop as a GIF (kept so re-forwarding preserves it).
+	Forwarded   bool
+	GifPlayback bool
+
 	// Reply / quote (optional)
 	ReplyToID         string
 	ReplyToSenderJID  string // quoted author's raw JID; lets the UI re-resolve stale names
@@ -1131,6 +1136,17 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 
 	parts := make([]fyne.CanvasObject, 0, 6)
 	naturalContentWidth := float32(0)
+
+	if msg.Forwarded && !msg.Deleted {
+		// Mirrors the official client: the tag sits above quote and sender.
+		fwd := canvas.NewText("↪ Forwarded", emptyHintColor)
+		fwd.TextStyle.Italic = true
+		fwd.TextSize = 12
+		parts = append(parts, fwd)
+		if w := fwd.MinSize().Width; w > naturalContentWidth {
+			naturalContentWidth = w
+		}
+	}
 
 	if !msg.Deleted {
 		if reply := buildReplyBox(msg, cv); reply != nil {
@@ -2412,6 +2428,8 @@ func (cv *ChatView) messageFromRecord(sm client.SavedMessage) *Message {
 		Height:            sm.Height,
 		Duration:          sm.Duration,
 		Thumb:             thumb,
+		Forwarded:         sm.Forwarded,
+		GifPlayback:       sm.GifPlayback,
 		ReplyToID:         sm.ReplyToID,
 		ReplyToSenderJID:  sm.ReplyToSenderJID,
 		ReplyToSenderName: sm.ReplyToSenderName,
@@ -2770,6 +2788,8 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 		Height:            msg.Height,
 		Duration:          msg.Duration,
 		Thumb:             msg.Thumb,
+		Forwarded:         msg.Forwarded,
+		GifPlayback:       msg.GifPlayback,
 		ReplyToID:         msg.ReplyToID,
 		ReplyToSenderJID:  msg.ReplyToSenderJID,
 		ReplyToSenderName: msg.ReplyToSenderName,
