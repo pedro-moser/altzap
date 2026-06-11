@@ -134,8 +134,12 @@ func (cv *ChatView) showForwardPicker(msg *Message) {
 	}
 	src := forwardSource(msg)
 
+	// allChats, not cachedChats: the latter is only the bucket the sidebar
+	// is showing (inbox OR archived), which would make archived groups
+	// unreachable as forward destinations — groups never appear in the
+	// contacts fallback.
 	cv.muCachedChats.RLock()
-	chats := append([]client.Chat(nil), cv.cachedChats...)
+	chats := append([]client.Chat(nil), cv.allChats...)
 	cv.muCachedChats.RUnlock()
 
 	all := mergeForwardCandidates(chats, cv.waClient.GetContacts(),
