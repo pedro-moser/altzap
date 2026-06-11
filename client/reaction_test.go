@@ -121,3 +121,49 @@ func TestDropNegativeLIDEntries(t *testing.T) {
 		t.Errorf("cache has %d entries, want 1", len(w.lidPNCache))
 	}
 }
+
+func TestEditMutator(t *testing.T) {
+	rec := SavedMessage{Text: "original"}
+
+	if !editMutator("novo", 100)(&rec) {
+		t.Fatal("first edit must report a change")
+	}
+	if rec.Text != "novo" || !rec.Edited || rec.EditedAt != 100 {
+		t.Fatalf("edit not applied: %+v", rec)
+	}
+
+	if editMutator("novo", 200)(&rec) {
+		t.Fatal("re-applying the identical edit must be a no-op")
+	}
+	if rec.EditedAt != 100 {
+		t.Fatalf("no-op edit must not touch EditedAt, got %d", rec.EditedAt)
+	}
+
+	if !editMutator("outro", 300)(&rec) {
+		t.Fatal("a different edit must apply")
+	}
+	if rec.Text != "outro" || rec.EditedAt != 300 {
+		t.Fatalf("second edit not applied: %+v", rec)
+	}
+}
+
+func TestRevokeMutator(t *testing.T) {
+	rec := SavedMessage{Text: "conteúdo"}
+
+	if !revokeMutator(100)(&rec) {
+		t.Fatal("first revoke must report a change")
+	}
+	if !rec.Deleted || rec.DeletedAt != 100 {
+		t.Fatalf("revoke not applied: %+v", rec)
+	}
+	if rec.Text != "conteúdo" {
+		t.Fatal("revoke must keep the original text in the record")
+	}
+
+	if revokeMutator(200)(&rec) {
+		t.Fatal("re-revoking must be a no-op")
+	}
+	if rec.DeletedAt != 100 {
+		t.Fatalf("no-op revoke must not touch DeletedAt, got %d", rec.DeletedAt)
+	}
+}

@@ -596,23 +596,47 @@ func (w *WhatsAppClient) eventHandler(evt any) {
 // content stays in the JSONL (so we have a record), but UI hides it behind a
 // "this message was deleted" placeholder.
 func (w *WhatsAppClient) handleRevoke(msg *events.Message, pmsg *waE2E.ProtocolMessage) {
-	key := pmsg.GetKey()
-	targetID := key.GetID()
-	chatJID := msg.Info.Chat.String()
+	targetID := pmsg.GetKey().GetID()
 	if targetID == "" {
 		return
 	}
 	ts := msg.Info.Timestamp.Unix()
+	if w.applyRevoke(msg.Info.Chat.String(), targetID, ts) {
+		return
+	}
+	// Target may be persisted under the LID/PN sibling chat.
+	if sib, ok := w.siblingChatJID(msg.Info.Chat); ok {
+		w.applyRevoke(sib.String(), targetID, ts)
+	}
+}
 
-	w.patchRecord(chatJID, targetID, func(rec *SavedMessage) bool {
+// revokeMutator marks a record deleted-for-everyone; no-op if already
+// deleted. Pure helper, unit-tested.
+func revokeMutator(ts int64) func(*SavedMessage) bool {
+	return func(rec *SavedMessage) bool {
 		if rec.Deleted {
 			return false
 		}
 		rec.Deleted = true
 		rec.DeletedAt = ts
 		return true
-	})
+	}
+}
 
+// applyRevoke persists the deleted-for-everyone state and notifies the UI.
+// Returns false when no record matches (chatJID, targetID) so callers can
+// retry under the sibling JID. Shared by the incoming REVOKE handler and
+// RevokeMessage's local echo (the server never echoes our own sends back).
+func (w *WhatsAppClient) applyRevoke(chatJID, targetID string, ts int64) bool {
+	patched := false
+	mutate := revokeMutator(ts)
+	w.patchRecord(chatJID, targetID, func(rec *SavedMessage) bool {
+		patched = true // record found — even a no-op mutate counts
+		return mutate(rec)
+	})
+	if !patched {
+		return false
+	}
 	if w.OnMessageDelete != nil {
 		w.OnMessageDelete(MessageDelete{
 			ChatJID:   chatJID,
@@ -620,6 +644,7 @@ func (w *WhatsAppClient) handleRevoke(msg *events.Message, pmsg *waE2E.ProtocolM
 			DeletedAt: ts,
 		})
 	}
+	return true
 }
 
 // handleEdit updates the target message's text in place. The new content is
@@ -645,7 +670,19 @@ func (w *WhatsAppClient) handleEdit(msg *events.Message, pmsg *waE2E.ProtocolMes
 	}
 	ts := msg.Info.Timestamp.Unix()
 
-	w.patchRecord(chatJID, targetID, func(rec *SavedMessage) bool {
+	if w.applyEdit(chatJID, targetID, newText, ts) {
+		return
+	}
+	// Target may be persisted under the LID/PN sibling chat.
+	if sib, ok := w.siblingChatJID(msg.Info.Chat); ok {
+		w.applyEdit(sib.String(), targetID, newText, ts)
+	}
+}
+
+// editMutator swaps a record's visible text for the edited version; no-op
+// when the same edit was already applied. Pure helper, unit-tested.
+func editMutator(newText string, ts int64) func(*SavedMessage) bool {
+	return func(rec *SavedMessage) bool {
 		if rec.Text == newText && rec.Edited {
 			return false
 		}
@@ -653,8 +690,23 @@ func (w *WhatsAppClient) handleEdit(msg *events.Message, pmsg *waE2E.ProtocolMes
 		rec.Edited = true
 		rec.EditedAt = ts
 		return true
-	})
+	}
+}
 
+// applyEdit persists an in-place text edit and notifies the UI. Returns
+// false when no record matches (chatJID, targetID) so callers can retry
+// under the sibling JID. Shared by the incoming MESSAGE_EDIT handler and
+// EditMessage's local echo (the server never echoes our own sends back).
+func (w *WhatsAppClient) applyEdit(chatJID, targetID, newText string, ts int64) bool {
+	patched := false
+	mutate := editMutator(newText, ts)
+	w.patchRecord(chatJID, targetID, func(rec *SavedMessage) bool {
+		patched = true // record found — even a no-op mutate counts
+		return mutate(rec)
+	})
+	if !patched {
+		return false
+	}
 	if w.OnMessageEdit != nil {
 		w.OnMessageEdit(MessageEdit{
 			ChatJID:   chatJID,
@@ -663,6 +715,7 @@ func (w *WhatsAppClient) handleEdit(msg *events.Message, pmsg *waE2E.ProtocolMes
 			EditedAt:  ts,
 		})
 	}
+	return true
 }
 
 // receiptStatus maps a whatsmeow ReceiptType to our normalized status string.
@@ -1312,6 +1365,38 @@ func (w *WhatsAppClient) SendReaction(chat, sender types.JID, msgID, emoji strin
 		// The target may be persisted under the LID/PN sibling chat.
 		if sib, ok := w.siblingChatJID(chat); ok {
 			w.applyReaction(sib.String(), msgID, r)
+		}
+	}
+	return nil
+}
+
+// EditWindow re-exports whatsmeow's documented server-side edit limit so
+// the UI can gate the "Edit…" action without importing the whole lib.
+const EditWindow = whatsmeow.EditWindow
+
+// EditMessage replaces the text of one of our own previously-sent messages.
+// whatsmeow doesn't validate the ~20min EditWindow — past it the server
+// rejects (error surfaces here) or recipients silently ignore the edit.
+//
+// Like every send, the server won't echo it back to this device, so on
+// success we apply the edit locally (persist + OnMessageEdit) — the same
+// pipeline incoming edits use.
+func (w *WhatsAppClient) EditMessage(chat types.JID, msgID, newText string) error {
+	if !w.IsConnected() {
+		return fmt.Errorf("not connected to WhatsApp")
+	}
+	msg := w.client.BuildEdit(chat, types.MessageID(msgID),
+		&waE2E.Message{Conversation: proto.String(newText)})
+	resp, err := w.client.SendMessage(context.Background(), chat, msg)
+	if err != nil {
+		return err
+	}
+	// resp.ID is the protocol message's own fresh ID — the edited record
+	// keeps msgID; only the timestamp from the ACK is useful here.
+	ts := resp.Timestamp.Unix()
+	if !w.applyEdit(chat.String(), msgID, newText, ts) {
+		if sib, ok := w.siblingChatJID(chat); ok {
+			w.applyEdit(sib.String(), msgID, newText, ts)
 		}
 	}
 	return nil

@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"time"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/widget"
 )
@@ -69,6 +71,15 @@ func (cv *ChatView) showMessageContextMenu(msg *Message, pos fyne.Position) {
 		forward.Disabled = true
 	}
 	items = append(items, fyne.NewMenuItemSeparator(), forward)
+
+	if msg.IsOwn {
+		items = append(items, fyne.NewMenuItemSeparator())
+		if msg.MediaType == "" && msg.Text != "" {
+			edit := fyne.NewMenuItem("Edit…", func() { cv.showEditDialog(msg) })
+			edit.Disabled = !canEditMessage(msg, time.Now())
+			items = append(items, edit)
+		}
+	}
 
 	widget.NewPopUpMenu(fyne.NewMenu("", items...), c).ShowAtPosition(pos)
 }
