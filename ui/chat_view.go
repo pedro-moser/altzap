@@ -671,6 +671,7 @@ func (cv *ChatView) Build() fyne.CanvasObject {
 
 	cv.priorTypedRune = nil
 	cv.installShortcuts()
+	cv.installDropHandler()
 
 	return mainSplit
 }

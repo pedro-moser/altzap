@@ -329,6 +329,43 @@ func (cv *ChatView) sendPastedFiles(jid types.JID, paths []string) {
 	}
 }
 
+// installDropHandler routes files dragged onto the window into the same
+// confirm-and-send flow as clipboard-pasted files (single image → preview
+// dialog; otherwise list confirmation). Drops with no chat open are
+// ignored — there's no destination to send to.
+func (cv *ChatView) installDropHandler() {
+	if cv.window == nil {
+		return
+	}
+	cv.window.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) {
+		if cv.currentChatJID == "" {
+			return
+		}
+		jid, err := types.ParseJID(cv.currentChatJID)
+		if err != nil {
+			return
+		}
+		paths := make([]string, 0, len(uris))
+		for _, u := range uris {
+			if u == nil || u.Scheme() != "file" {
+				continue
+			}
+			p := u.Path()
+			if p == "" {
+				continue
+			}
+			if st, err := os.Stat(p); err != nil || !st.Mode().IsRegular() {
+				continue // directories and vanished files
+			}
+			paths = append(paths, p)
+		}
+		if len(paths) == 0 {
+			return
+		}
+		cv.confirmAndSendPastedFiles(jid, paths)
+	})
+}
+
 // onMicClicked toggles voice recording. First click starts ffmpeg; second
 // click stops it and sends the resulting OGG/Opus to the open chat.
 func (cv *ChatView) onMicClicked() {
