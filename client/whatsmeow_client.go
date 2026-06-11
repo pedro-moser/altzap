@@ -710,44 +710,81 @@ func (w *WhatsAppClient) handleReceipt(r *events.Receipt) {
 
 // handleReaction updates the target message's Reactions list. WhatsApp's
 // model: each user has ≤1 reaction per message; an empty emoji removes the
-// existing one. We patch the JSONL atomically and fire OnReactionUpdate.
+// existing one. We patch the persisted record and fire OnReactionUpdate.
+//
+// Covers reactions from third parties AND from the user's other devices
+// (phone echo via multi-device fan-out). Reactions sent by THIS device
+// never arrive here — the server doesn't echo a device's own sends back
+// to it — so SendReaction applies its own local echo.
 func (w *WhatsAppClient) handleReaction(msg *events.Message, rxn *waE2E.ReactionMessage) {
 	key := rxn.GetKey()
 	targetID := key.GetID()
-	chatJID := msg.Info.Chat.String()
 	if targetID == "" {
 		return
 	}
-	emoji := rxn.GetText()
-	senderJID := msg.Info.Sender.String()
+	sender := msg.Info.Sender
+	senderJID := sender.ToNonAD().String()
+	if msg.Info.IsFromMe {
+		// Canonicalize our own JID so the same account's reaction dedupes
+		// whether it arrives LID- or PN-addressed (and matches the local
+		// echo SendReaction already applied).
+		senderJID = w.ownSenderJID()
+	}
 	senderName := msg.Info.PushName
 	if senderName == "" {
-		senderName = w.LookupName(msg.Info.Sender)
+		senderName = w.LookupName(sender)
 	}
-	ts := msg.Info.Timestamp.Unix()
 
+	r := SavedReaction{
+		Emoji:      rxn.GetText(),
+		SenderJID:  senderJID,
+		SenderName: senderName,
+		Timestamp:  msg.Info.Timestamp.Unix(),
+	}
+	if w.applyReaction(msg.Info.Chat.String(), targetID, r) {
+		return
+	}
+	// Target not stored under this chat JID — the message may have been
+	// persisted under the LID/PN sibling chat. Retry there instead of
+	// firing a destructive update with an empty list.
+	if sib, ok := w.siblingChatJID(msg.Info.Chat); ok {
+		w.applyReaction(sib.String(), targetID, r)
+	}
+}
+
+// mergeReaction drops any prior reaction from r.SenderJID and appends r when
+// its emoji is non-empty (WhatsApp: at most one reaction per user per
+// message; an empty emoji is a removal). Pure helper, unit-tested.
+func mergeReaction(existing []SavedReaction, r SavedReaction) []SavedReaction {
+	filtered := existing[:0]
+	for _, old := range existing {
+		if old.SenderJID != r.SenderJID {
+			filtered = append(filtered, old)
+		}
+	}
+	if r.Emoji != "" {
+		filtered = append(filtered, r)
+	}
+	return filtered
+}
+
+// applyReaction merges one user's reaction into the target message's
+// persisted Reactions and notifies the UI with the resulting full list.
+// Returns false (and stays silent) when no record matches (chatJID,
+// targetID) — Patch is a no-op on missing rows, and notifying anyway would
+// wipe the UI's in-memory chips with an empty list.
+func (w *WhatsAppClient) applyReaction(chatJID, targetID string, r SavedReaction) bool {
+	patched := false
 	var current []SavedReaction
 	w.patchRecord(chatJID, targetID, func(rec *SavedMessage) bool {
-		// Drop any prior reaction from this sender.
-		filtered := rec.Reactions[:0]
-		for _, r := range rec.Reactions {
-			if r.SenderJID != senderJID {
-				filtered = append(filtered, r)
-			}
-		}
-		if emoji != "" {
-			filtered = append(filtered, SavedReaction{
-				Emoji:      emoji,
-				SenderJID:  senderJID,
-				SenderName: senderName,
-				Timestamp:  ts,
-			})
-		}
-		rec.Reactions = filtered
-		current = filtered
+		rec.Reactions = mergeReaction(rec.Reactions, r)
+		current = rec.Reactions
+		patched = true
 		return true
 	})
-
+	if !patched {
+		return false
+	}
 	if w.OnReactionUpdate != nil {
 		w.OnReactionUpdate(ReactionUpdate{
 			ChatJID:   chatJID,
@@ -755,6 +792,37 @@ func (w *WhatsAppClient) handleReaction(msg *events.Message, rxn *waE2E.Reaction
 			Reactions: current,
 		})
 	}
+	return true
+}
+
+// ownSenderJID is the canonical (non-AD, PN-flavoured) JID string used to
+// identify this account in reaction records, regardless of whether an event
+// addressed us by LID or phone number.
+func (w *WhatsAppClient) ownSenderJID() string {
+	own := w.OwnJID()
+	if own.IsEmpty() {
+		return ""
+	}
+	return own.ToNonAD().String()
+}
+
+// siblingChatJID maps a 1-1 chat JID to its LID/PN twin, when whatsmeow's
+// lid_map knows the pairing. Group and unmapped JIDs return ok=false.
+func (w *WhatsAppClient) siblingChatJID(chat types.JID) (types.JID, bool) {
+	switch chat.Server {
+	case types.HiddenUserServer:
+		return w.lookupPNForLID(chat)
+	case types.DefaultUserServer:
+		if w.client == nil || w.client.Store == nil || w.client.Store.LIDs == nil {
+			return types.JID{}, false
+		}
+		lid, err := w.client.Store.LIDs.GetLIDForPN(context.Background(), chat)
+		if err != nil || lid.IsEmpty() {
+			return types.JID{}, false
+		}
+		return lid, true
+	}
+	return types.JID{}, false
 }
 
 // persistIncoming writes a SavedMessage record for a freshly-arrived event.
@@ -1142,15 +1210,33 @@ func (w *WhatsAppClient) OwnJID() types.JID {
 // SendReaction emits an emoji reaction to the referenced message. Empty
 // emoji removes the user's previous reaction. WhatsApp accepts at most one
 // reaction per user per message — sending a different emoji replaces the
-// previous one server-side; the eventual ReactionMessage echo is what
-// updates our in-memory Message.Reactions via OnReactionUpdate.
+// previous one server-side.
+//
+// The server never echoes this device's own sends back to it, so after a
+// successful send we apply the reaction locally (persist + OnReactionUpdate)
+// — without this the UI would never show the user's own reactions.
 func (w *WhatsAppClient) SendReaction(chat, sender types.JID, msgID, emoji string) error {
 	if !w.IsConnected() {
 		return fmt.Errorf("not connected to WhatsApp")
 	}
 	msg := w.client.BuildReaction(chat, sender, types.MessageID(msgID), emoji)
-	_, err := w.client.SendMessage(context.Background(), chat, msg)
-	return err
+	resp, err := w.client.SendMessage(context.Background(), chat, msg)
+	if err != nil {
+		return err
+	}
+
+	r := SavedReaction{
+		Emoji:     emoji,
+		SenderJID: w.ownSenderJID(),
+		Timestamp: resp.Timestamp.Unix(),
+	}
+	if !w.applyReaction(chat.String(), msgID, r) {
+		// The target may be persisted under the LID/PN sibling chat.
+		if sib, ok := w.siblingChatJID(chat); ok {
+			w.applyReaction(sib.String(), msgID, r)
+		}
+	}
+	return nil
 }
 
 // persistOwn writes a freshly-sent record to the chat's JSONL. Tolerates
@@ -1162,6 +1248,11 @@ func (w *WhatsAppClient) persistOwn(rec SavedMessage) error {
 	}
 	if rec.Text == "" && rec.MediaType == "" {
 		return nil
+	}
+	if rec.FromMe && rec.SenderJID == "" {
+		// Stamp our own JID so later actions on this record (reacting,
+		// quoting) don't have to guess the sender.
+		rec.SenderJID = w.ownSenderJID()
 	}
 	if rec.Timestamp == 0 {
 		rec.Timestamp = time.Now().Unix()

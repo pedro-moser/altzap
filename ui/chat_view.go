@@ -2514,11 +2514,10 @@ func (cv *ChatView) beginReply(msg *Message) {
 	cv.replyEscPop = pushEsc(cv.cancelReply)
 }
 
-// sendReaction emits an emoji reaction targeting msg. Server echoes via
-// OnReactionUpdate, which replaces our in-memory Reactions list — so
-// there's no optimistic local mutation here (would race with the echo
-// and risk doubles). Latency is one round-trip; acceptable for a
-// non-blocking single-button click.
+// sendReaction emits an emoji reaction targeting msg. The client applies a
+// local echo (persist + OnReactionUpdate) after a successful send — the
+// server never echoes this device's own sends back, so without that the
+// chip would never appear.
 func (cv *ChatView) sendReaction(msg *Message, emoji string) {
 	if msg == nil || cv.currentChatJID == "" {
 		return
@@ -2535,7 +2534,13 @@ func (cv *ChatView) sendReaction(msg *Message, emoji string) {
 			if own := cv.waClient.OwnJID(); !own.IsEmpty() {
 				senderJID = own.String()
 			}
+		} else if chat.Server == types.GroupServer {
+			// In a group the reaction key needs the real author; using the
+			// group JID would build a key no recipient can match.
+			dialog.ShowError(fmt.Errorf("can't react: this message predates sender tracking"), cv.window)
+			return
 		} else {
+			// 1-1: the chat JID is the only other participant.
 			senderJID = cv.currentChatJID
 		}
 	}
@@ -2548,6 +2553,9 @@ func (cv *ChatView) sendReaction(msg *Message, emoji string) {
 	go func() {
 		if err := cv.waClient.SendReaction(chat, sender, msg.ID, emoji); err != nil {
 			log.Printf("send reaction (msg=%s emoji=%q): %v", msg.ID, emoji, err)
+			fyne.Do(func() {
+				dialog.ShowError(fmt.Errorf("reaction failed: %w", err), cv.window)
+			})
 		}
 	}()
 }
