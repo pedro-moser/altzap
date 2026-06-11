@@ -754,7 +754,8 @@ func (w *WhatsAppClient) handleReaction(msg *events.Message, rxn *waE2E.Reaction
 
 // mergeReaction drops any prior reaction from r.SenderJID and appends r when
 // its emoji is non-empty (WhatsApp: at most one reaction per user per
-// message; an empty emoji is a removal). Pure helper, unit-tested.
+// message; an empty emoji is a removal). Callers must canonicalize the
+// sender JIDs first — comparison is exact-string. Pure helper, unit-tested.
 func mergeReaction(existing []SavedReaction, r SavedReaction) []SavedReaction {
 	filtered := existing[:0]
 	for _, old := range existing {
@@ -768,16 +769,72 @@ func mergeReaction(existing []SavedReaction, r SavedReaction) []SavedReaction {
 	return filtered
 }
 
+// dedupeReactions collapses entries that share a SenderJID, keeping the
+// last (= most recently appended) one. Needed once for records persisted
+// before sender canonicalization: the same user's LID- and PN-flavoured
+// entries collide after canonSenderJID folds them. Pure helper, unit-tested.
+func dedupeReactions(rs []SavedReaction) []SavedReaction {
+	lastIdx := make(map[string]int, len(rs))
+	for i, r := range rs {
+		lastIdx[r.SenderJID] = i
+	}
+	out := rs[:0]
+	for i, r := range rs {
+		if lastIdx[r.SenderJID] == i {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// canonSenderJID normalizes a reaction sender for dedupe: strips the device
+// (legacy records stored AD JIDs like "<user>:23@server"), folds the
+// account's own LID/PN flavours into the canonical own JID, and bridges
+// third-party LIDs to their phone JID when the mapping is known.
+// Best-effort — unparseable input and unmapped LIDs pass through.
+func (w *WhatsAppClient) canonSenderJID(s string) string {
+	if s == "" {
+		return s
+	}
+	jid, err := types.ParseJID(s)
+	if err != nil {
+		return s
+	}
+	jid = jid.ToNonAD()
+	if w.client != nil && w.client.Store != nil {
+		if own := w.client.Store.ID; own != nil && jid.User == own.User {
+			return w.ownSenderJID()
+		}
+		if lid := w.client.Store.LID; !lid.IsEmpty() && jid.User == lid.User {
+			return w.ownSenderJID()
+		}
+	}
+	if jid.Server == types.HiddenUserServer {
+		if pn, ok := w.lookupPNForLID(jid); ok {
+			return pn.ToNonAD().String()
+		}
+	}
+	return jid.String()
+}
+
 // applyReaction merges one user's reaction into the target message's
 // persisted Reactions and notifies the UI with the resulting full list.
 // Returns false (and stays silent) when no record matches (chatJID,
 // targetID) — Patch is a no-op on missing rows, and notifying anyway would
 // wipe the UI's in-memory chips with an empty list.
+//
+// Stored senders are canonicalized on the way through, which both makes the
+// merge match records persisted before canonicalization existed (raw AD /
+// LID-flavoured JIDs) and migrates those records in place on write-back.
 func (w *WhatsAppClient) applyReaction(chatJID, targetID string, r SavedReaction) bool {
 	patched := false
 	var current []SavedReaction
+	r.SenderJID = w.canonSenderJID(r.SenderJID)
 	w.patchRecord(chatJID, targetID, func(rec *SavedMessage) bool {
-		rec.Reactions = mergeReaction(rec.Reactions, r)
+		for i := range rec.Reactions {
+			rec.Reactions[i].SenderJID = w.canonSenderJID(rec.Reactions[i].SenderJID)
+		}
+		rec.Reactions = mergeReaction(dedupeReactions(rec.Reactions), r)
 		current = rec.Reactions
 		patched = true
 		return true

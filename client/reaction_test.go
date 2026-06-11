@@ -68,3 +68,34 @@ func TestMergeReaction(t *testing.T) {
 		})
 	}
 }
+
+func TestDedupeReactions(t *testing.T) {
+	// Post-canonicalization, a user's legacy LID- and PN-flavoured entries
+	// collapse to the same SenderJID; the most recent (last) must win.
+	canon := "5511999999999@s.whatsapp.net"
+	other := SavedReaction{Emoji: "❤️", SenderJID: "222@s.whatsapp.net", Timestamp: 15}
+
+	in := []SavedReaction{
+		{Emoji: "👍", SenderJID: canon, Timestamp: 10}, // old LID twin, now canonical
+		other,
+		{Emoji: "😂", SenderJID: canon, Timestamp: 20}, // newer entry from the same user
+	}
+	want := []SavedReaction{
+		other,
+		{Emoji: "😂", SenderJID: canon, Timestamp: 20},
+	}
+
+	if got := dedupeReactions(in); !reflect.DeepEqual(got, want) {
+		t.Errorf("dedupeReactions() = %+v, want %+v", got, want)
+	}
+
+	// No twins → unchanged.
+	clean := []SavedReaction{other, {Emoji: "👍", SenderJID: canon, Timestamp: 9}}
+	if got := dedupeReactions(append([]SavedReaction(nil), clean...)); !reflect.DeepEqual(got, clean) {
+		t.Errorf("dedupeReactions(clean) = %+v, want unchanged %+v", got, clean)
+	}
+
+	if got := dedupeReactions(nil); len(got) != 0 {
+		t.Errorf("dedupeReactions(nil) = %+v, want empty", got)
+	}
+}
