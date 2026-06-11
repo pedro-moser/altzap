@@ -36,6 +36,8 @@
 | D11 — drag & drop de arquivos | `e109eeb` | ✅ |
 
 > Nota: `client/forward.go` já envia VideoMessage (re-upload) — B7 agora é só o picker/ffprobe do envio *novo* de vídeo.
+>
+> Limitação conhecida (revisão 2026-06-11): forward de **GIF** chega como vídeo comum — GIFs são `VideoMessage{GifPlayback:true}` e a flag não é capturada no ingest (`SavedMessage` não tem o campo; exigiria coluna nova + primeira migração ALTER TABLE do schema). Fazer junto com a migração que o selo "Forwarded" recebido também vai precisar.
 
 **Pendentes**, em ordem sugerida: C4 (split do chat_view.go — fazer antes de B3b/c), B3b/c (editar + apagar p/ todos no menu de contexto), B4 (typing), C5 (coalesce refreshMessages), C3 (decode assíncrono), C1 (paginação), B7 (vídeo), e o restante do Milestone D.
 
