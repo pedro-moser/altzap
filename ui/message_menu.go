@@ -62,5 +62,13 @@ func (cv *ChatView) showMessageContextMenu(msg *Message, pos fyne.Position) {
 		}),
 	)
 
+	forward := fyne.NewMenuItem("Forward…", func() { cv.showForwardPicker(msg) })
+	if msg.MediaType != "" && msg.MediaPath == "" {
+		// Media still downloading (or never downloaded — history-sync
+		// records): nothing local to re-upload yet.
+		forward.Disabled = true
+	}
+	items = append(items, fyne.NewMenuItemSeparator(), forward)
+
 	widget.NewPopUpMenu(fyne.NewMenu("", items...), c).ShowAtPosition(pos)
 }
