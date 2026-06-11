@@ -21,7 +21,21 @@ func TestTappableBox_TappedFiresCallback(t *testing.T) {
 
 func TestTappableBox_NilCallbackSafe(t *testing.T) {
 	tb := newTappableBox(widget.NewLabel("x"), nil)
-	tb.Tapped(nil) // must not panic
+	tb.Tapped(nil)          // must not panic
+	tb.TappedSecondary(nil) // ditto, with no secondary handler wired
+}
+
+func TestTappableBox_SecondaryTapForwardsEvent(t *testing.T) {
+	var got *fyne.PointEvent
+	tb := newTappableBox(widget.NewLabel("x"), nil)
+	tb.SetOnSecondary(func(e *fyne.PointEvent) { got = e })
+
+	ev := &fyne.PointEvent{AbsolutePosition: fyne.NewPos(7, 9)}
+	tb.TappedSecondary(ev)
+
+	if got != ev {
+		t.Fatalf("secondary tap must forward the original event, got %+v", got)
+	}
 }
 
 func TestTappableBox_CursorIsPointer(t *testing.T) {
@@ -34,6 +48,7 @@ func TestTappableBox_CursorIsPointer(t *testing.T) {
 // Compile-time check that tappableBox satisfies fyne.Tappable + the
 // Cursorable interface — guards against signature drift.
 var (
-	_ fyne.Tappable      = (*tappableBox)(nil)
-	_ desktop.Cursorable = (*tappableBox)(nil)
+	_ fyne.Tappable          = (*tappableBox)(nil)
+	_ fyne.SecondaryTappable = (*tappableBox)(nil)
+	_ desktop.Cursorable     = (*tappableBox)(nil)
 )

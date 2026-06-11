@@ -17,8 +17,9 @@ import (
 // from one call site.
 type tappableBox struct {
 	widget.BaseWidget
-	content fyne.CanvasObject
-	onTap   func()
+	content     fyne.CanvasObject
+	onTap       func()
+	onSecondary func(*fyne.PointEvent)
 }
 
 func newTappableBox(content fyne.CanvasObject, onTap func()) *tappableBox {
@@ -36,6 +37,21 @@ func (t *tappableBox) CreateRenderer() fyne.WidgetRenderer {
 func (t *tappableBox) Tapped(*fyne.PointEvent) {
 	if t.onTap != nil {
 		t.onTap()
+	}
+}
+
+// SetOnSecondary wires an optional right-click handler. Without it the
+// box swallows the event silently — Fyne's hit-test stops at the deepest
+// matching widget, so a right-click over the quote preview would never
+// reach the bubble's context-menu wrapper underneath.
+func (t *tappableBox) SetOnSecondary(fn func(*fyne.PointEvent)) {
+	t.onSecondary = fn
+}
+
+// TappedSecondary forwards right-clicks to the optional handler.
+func (t *tappableBox) TappedSecondary(e *fyne.PointEvent) {
+	if t.onSecondary != nil {
+		t.onSecondary(e)
 	}
 }
 

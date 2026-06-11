@@ -1141,9 +1141,19 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 			var part fyne.CanvasObject = reply
 			if msg.ReplyToID != "" {
 				originID := msg.ReplyToID
-				part = newTappableBox(reply, func() {
+				box := newTappableBox(reply, func() {
 					cv.scrollToMessageByID(originID)
 				})
+				// Right-click over the quote area should open the same
+				// context menu as the rest of the bubble — without this
+				// the box swallows the event (deepest-match hit-test).
+				target := msg
+				box.SetOnSecondary(func(ev *fyne.PointEvent) {
+					if ev != nil {
+						cv.showMessageContextMenu(target, ev.AbsolutePosition)
+					}
+				})
+				part = box
 			}
 			parts = append(parts, part)
 			if w := reply.MinSize().Width; w > naturalContentWidth {
