@@ -36,10 +36,22 @@
 | D11 — drag & drop de arquivos | `e109eeb` | ✅ |
 
 > Nota: `client/forward.go` já envia VideoMessage (re-upload) — B7 agora é só o picker/ffprobe do envio *novo* de vídeo.
->
-> Limitação conhecida (revisão 2026-06-11): forward de **GIF** chega como vídeo comum — GIFs são `VideoMessage{GifPlayback:true}` e a flag não é capturada no ingest (`SavedMessage` não tem o campo; exigiria coluna nova + primeira migração ALTER TABLE do schema). Fazer junto com a migração que o selo "Forwarded" recebido também vai precisar.
 
-**Pendentes**, em ordem sugerida: C4 (split do chat_view.go — fazer antes de B3b/c), B3b/c (editar + apagar p/ todos no menu de contexto), B4 (typing), C5 (coalesce refreshMessages), C3 (decode assíncrono), C1 (paginação), B7 (vídeo), e o restante do Milestone D.
+**Sessão 2026-06-11 (fase 2)** — revisão adversarial da fase 1 + B3b/c:
+
+| Tarefa | Commit | |
+|--------|--------|---|
+| Fixes da revisão: picker de forward usa allChats; canonicalização LID/PN no dedupe de reações | `efd4faa` `c907b50` | ✅ |
+| Right-click sobre o quote-preview abre o menu | `946fe26` | ✅ |
+| Cache negativo no lookupPNForLID (SQLite por render) | `0c0d6cb` | ✅ |
+| Primeira migração de schema (colunas forwarded + gif_playback) | `dcc6be9` | ✅ |
+| Selo "↪ Forwarded" recebido + GIF fiel no forward | `f59eb25` | ✅ |
+| B3b — editar mensagem própria (menu de contexto, EditWindow 20min) | `a7d7890` | ✅ |
+| B3c — apagar para todos (menu de contexto, confirm) | `f3197d4` | ✅ |
+
+> Padrão consolidado: todo send precisa de **echo local** (applyReaction/applyEdit/applyRevoke — persiste + dispara o mesmo callback do recebimento, com fallback de sibling LID/PN). O servidor nunca ecoa sends ao device emissor.
+
+**Pendentes**, em ordem sugerida: C4 (split do chat_view.go, ~3000 linhas), B4 (typing), C5 (coalesce refreshMessages), C3 (decode assíncrono), C1 (paginação), B7 (picker de envio de vídeo), edição de caption (v2 do B3b — exige reter proto de mídia), e o restante do Milestone D.
 
 > Validação manual recomendada pós-B1/B5/B6 (precisa de sessão real): badge do celular limpa ao abrir chat com não-lidas; fixados no topo; mutado não notifica; arquivar pelo menu ⋯ reflete no celular; Shift+Enter no composer; "💬 Conversar com +número" no novo chat.
 
@@ -217,13 +229,13 @@ Dividir em três commits:
 ## Ordem de execução recomendada
 
 ```
-[✅ feitos] 0, A1–A4, B1, B9, C2, B5, B2, B6, D8, B8, B3a, D11,
-           reações(fix), quote-names(fix), forward, paste-arquivos — ver Status acima
-C4 (split do chat_view.go)    ← próximo: destrava paralelismo e o B3b/c
-B3b → B3c (editar / apagar p/ todos — itens novos no menu de contexto existente)
+[✅ feitos] 0, A1–A4, B1, B9, C2, B5, B2, B6, D8, B8, B3a, B3b, B3c, D11,
+           reações(fix), quote-names(fix), forward+selo, paste-arquivos,
+           migração de schema — ver Status acima
+C4 (split do chat_view.go)    ← próximo: arquivo passou de 3000 linhas
 B4 (typing) → C5 (coalesce refreshMessages)
 C3 (decode assíncrono) → C1 (paginação SQL)
-B7 (vídeo) e Milestone D conforme apetite
+B7 (picker de vídeo) e Milestone D conforme apetite
 ```
 
 **Notas para o fluxo multi-agente:** um agente implementa, outro revisa (commits/revisões auto-contidos). Tarefas em `‖` não compartilham arquivos após C4. Specs/planos detalhados de tarefas L (C1, D4) podem ganhar um doc próprio em `docs/superpowers/specs/` antes da implementação, seguindo o padrão dos existentes.
