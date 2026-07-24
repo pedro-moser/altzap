@@ -3,23 +3,55 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"log"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 
 	"altzap/client"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
+// capWriter accumulates at most max bytes and silently drops the rest —
+// enough to quote a launcher's error line without letting a chatty handler
+// balloon memory. Never reports a short write, so it is safe as cmd.Stderr.
+type capWriter struct {
+	buf []byte
+	max int
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	if room := w.max - len(w.buf); room > 0 {
+		if len(p) > room {
+			p = p[:room]
+		}
+		w.buf = append(w.buf, p...)
+	}
+	return n, nil
+}
+
+func (w *capWriter) String() string { return strings.TrimSpace(string(w.buf)) }
+
 // openExternal launches the OS default handler for the given file path.
-// Linux: xdg-open. macOS: open. Windows: rundll32 url.dll. Errors are silent
-// — the user will notice if nothing opens, and we don't want to block the UI.
-func openExternal(path string) {
+// Linux: xdg-open. macOS: open. Windows: rundll32 url.dll.
+//
+// The launcher's stderr is captured rather than discarded. This matters more
+// than it looks: xdg-open exits 0 even when the handler it spawned dies
+// immediately (a viewer left dangling by a library ABI bump, say), so from
+// the app's side a broken "Open" is indistinguishable from a working one.
+// The handler's own complaint on stderr is then the only evidence there is —
+// so it always reaches the log, and a genuinely failed launch also reaches
+// the user as a dialog.
+func openExternal(path string, win fyne.Window) {
 	if path == "" {
 		return
 	}
@@ -34,9 +66,42 @@ func openExternal(path string) {
 	default:
 		return
 	}
-	if err := cmd.Start(); err == nil {
-		go cmd.Wait()
+	stderr := &capWriter{max: 4096}
+	cmd.Stderr = stderr
+
+	if err := cmd.Start(); err != nil {
+		log.Printf("openExternal %s: start: %v", path, err)
+		reportOpenFailure(path, err.Error(), win)
+		return
 	}
+	go func() {
+		err := cmd.Wait()
+		detail := stderr.String()
+		if err == nil {
+			if detail != "" {
+				log.Printf("openExternal %s: launcher exited 0 but wrote: %s", path, detail)
+			}
+			return
+		}
+		log.Printf("openExternal %s: %v: %s", path, err, detail)
+		if detail == "" {
+			detail = err.Error()
+		}
+		if win != nil {
+			fyne.Do(func() { reportOpenFailure(path, detail, win) })
+		}
+	}()
+}
+
+// reportOpenFailure tells the user their desktop couldn't open the file and
+// points at the way out that doesn't depend on a working handler.
+func reportOpenFailure(path, detail string, win fyne.Window) {
+	if win == nil {
+		return
+	}
+	dialog.ShowError(fmt.Errorf(
+		"could not open %s with your desktop's default application:\n\n%s\n\nUse \"Save as…\" from the message's right-click menu to write it somewhere and open it yourself.",
+		filepath.Base(path), detail), win)
 }
 
 // humanizeBytes turns 1234567 into "1.2 MB".
@@ -148,7 +213,7 @@ func showImageFullscreen(path string, win fyne.Window) {
 	closeBtn.Importance = widget.LowImportance
 
 	openExtBtn := widget.NewButtonWithIcon("Open externally", theme.ZoomFitIcon(), func() {
-		openExternal(path)
+		openExternal(path, win)
 		dismiss()
 	})
 	openExtBtn.Importance = widget.LowImportance
@@ -259,7 +324,7 @@ func buildAudioBubble(msg *Message) fyne.CanvasObject {
 	return container.New(layout.NewGridWrapLayout(fyne.NewSize(240, 44)), row)
 }
 
-func buildDocBubble(msg *Message) fyne.CanvasObject {
+func buildDocBubble(msg *Message, window fyne.Window) fyne.CanvasObject {
 	name := msg.FileName
 	if name == "" {
 		name = "Document"
@@ -272,7 +337,7 @@ func buildDocBubble(msg *Message) fyne.CanvasObject {
 	sizeLbl.Importance = widget.LowImportance
 
 	openBtn := widget.NewButtonWithIcon("Open", theme.DocumentIcon(), func() {
-		openExternal(client.AbsoluteMediaPath(msg.MediaPath))
+		openExternal(client.AbsoluteMediaPath(msg.MediaPath), window)
 	})
 	if msg.MediaPath == "" {
 		openBtn.SetText("Downloading…")

@@ -1217,7 +1217,7 @@ func (cv *ChatView) buildMessageBubble(msg *Message, showSender bool, dateSep st
 				naturalContentWidth = w
 			}
 		case "document":
-			mc := cv.wrapBubbleGestures(msg, buildDocBubble(msg))
+			mc := cv.wrapBubbleGestures(msg, buildDocBubble(msg, cv.window))
 			parts = append(parts, mc)
 			if w := mc.MinSize().Width; w > naturalContentWidth {
 				naturalContentWidth = w

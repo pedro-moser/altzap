@@ -73,7 +73,7 @@ func showVideoFullscreen(path string, win fyne.Window) {
 	closeBtn.Importance = widget.LowImportance
 
 	openExtBtn := widget.NewButtonWithIcon("Open externally", theme.MediaPlayIcon(), func() {
-		openExternal(path)
+		openExternal(path, win)
 		dismiss()
 	})
 	openExtBtn.Importance = widget.LowImportance
