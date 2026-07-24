@@ -72,6 +72,13 @@ func (cv *ChatView) showMessageContextMenu(msg *Message, pos fyne.Position) {
 	}
 	items = append(items, fyne.NewMenuItemSeparator(), forward)
 
+	if msg.MediaType != "" {
+		save := fyne.NewMenuItem("Save as…", func() { cv.saveAttachment(msg) })
+		// Same gate as Forward: nothing on disk yet, nothing to copy out.
+		save.Disabled = msg.MediaPath == ""
+		items = append(items, save)
+	}
+
 	if msg.IsOwn {
 		items = append(items, fyne.NewMenuItemSeparator())
 		if msg.MediaType == "" && msg.Text != "" {

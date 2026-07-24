@@ -1469,7 +1469,7 @@ func stashOutgoingMedia(srcPath, chatJID, msgID, mime string) string {
 	if srcPath == "" || msgID == "" {
 		return ""
 	}
-	ext := extForMime(mime)
+	ext := ExtForMime(mime)
 	if ext == ".bin" {
 		// Fall back to the source's actual extension when the mime is
 		// generic/octet-stream — keeps "report.pdf" naming on disk.

@@ -21,8 +21,11 @@ var (
 	inflight   = make(map[string]chan struct{})
 )
 
-// extForMime maps a MIME type to a sensible file extension.
-func extForMime(mime string) string {
+// ExtForMime maps a MIME type to a sensible file extension. Unknown types
+// fall back to ".bin" — callers that surface a name to the user (the
+// "Save as" dialog) should treat that as "no extension" rather than pass
+// it on, since ".bin" tells the OS nothing about how to open the file.
+func ExtForMime(mime string) string {
 	mime = strings.ToLower(mime)
 	switch {
 	case strings.HasPrefix(mime, "image/jpeg"):
@@ -98,7 +101,7 @@ func (w *WhatsAppClient) downloadAndPatch(msg *events.Message) {
 
 	chatJID := msg.Info.Chat.String()
 	msgID := msg.Info.ID
-	ext := extForMime(mime)
+	ext := ExtForMime(mime)
 	target := mediaPath(chatJID, msgID, ext)
 
 	inflightMu.Lock()
