@@ -206,8 +206,24 @@ type ChatView struct {
 	muReloadTimer sync.Mutex
 
 	// Render-time limit for the open chat: 0 means default. Reset on chat
-	// switch; "Load older" bumps by renderChunk.
+	// switch; "Load older" bumps by renderChunk, and each arrival that
+	// lands while the view is pinned bumps it by one (see chat_follow.go).
 	renderLimit int
+
+	// Tail-follow state for the message list — UI thread only, no locking.
+	// followTail means "keep the newest message on screen"; lastSetOffset
+	// is the scroll offset we last set ourselves, which lets an untouched
+	// viewport skip the probe; liveEdgeSeen is the probe's answer, written
+	// by messageListUpdate as the visible rows go by; pendingNew counts
+	// arrivals the user hasn't reached and drives the floating pill.
+	// See chat_follow.go.
+	followTail    bool
+	lastSetOffset float32
+	liveEdgeSeen  bool
+	liveEdgeSlack int
+	pendingNew    int
+	newMsgPill    *widget.Button
+	newMsgPillBox *fyne.Container
 
 	// Reply mode (Ctrl+R): when active, replyTargetID identifies the
 	// bubble currently highlighted as the quote target. replyModeEscPop
@@ -317,6 +333,7 @@ func NewChatView(fyneApp fyne.App, waClient *client.WhatsAppClient, window fyne.
 		fyneApp:       fyneApp,
 		waClient:      waClient,
 		window:        window,
+		followTail:    true,
 		messages:      make(map[string][]*Message),
 		unread:        make(map[string]int),
 		pendingReads:  make(map[string][]client.MarkTarget),
@@ -747,7 +764,7 @@ func (cv *ChatView) buildChatRealView() fyne.CanvasObject {
 	msgScroll := cv.buildMessageArea()
 
 	cv.chatBgCanvas = canvas.NewRectangle(chatBgColor)
-	msgArea := container.NewStack(cv.chatBgCanvas, msgScroll)
+	msgArea := container.NewStack(cv.chatBgCanvas, msgScroll, cv.buildNewMessagesPill())
 
 	inputRow := cv.inputBarBuild()
 	cv.inputBg = canvas.NewRectangle(ctpMantle)
@@ -1047,6 +1064,20 @@ func (cv *ChatView) messageListUpdate(id widget.ListItemID, item fyne.CanvasObje
 	start := cv.messageWindowStart(msgs)
 	hasOlder := start > 0
 
+	// A row only reaches UpdateItem when it's on screen, which is how the
+	// tail-follow policy learns where the user is looking (chat_follow.go).
+	// Two answers come out of it: atLiveEdge feeds the probe, offset by
+	// liveEdgeSlack because a probe that runs right after an append is
+	// really asking about the row before the new tail; isTailRow is exact
+	// because it clears the pill and pays read receipts. Row math mirrors
+	// messageListLength.
+	lastRow := len(msgs) - start - 1
+	if hasOlder {
+		lastRow++
+	}
+	atLiveEdge := id >= lastRow-cv.liveEdgeSlack
+	isTailRow := id == lastRow
+
 	var content fyne.CanvasObject
 	var cacheKey string
 	if hasOlder && id == 0 {
@@ -1124,6 +1155,12 @@ func (cv *ChatView) messageListUpdate(id widget.ListItemID, item fyne.CanvasObje
 			cv.muBubbleHeights.Unlock()
 		}
 		cv.messageList.SetItemHeight(id, h)
+	}
+	if atLiveEdge {
+		cv.liveEdgeSeen = true
+	}
+	if isTailRow {
+		cv.noteTailRowVisible()
 	}
 }
 
@@ -1381,15 +1418,11 @@ func (cv *ChatView) RefreshAll() {
 	}
 }
 
-// refreshMessages rebuilds the visible window and either follows the new
-// bottom (when the user was sitting at/near the latest message) or
-// preserves their current scroll position (when they're reading older
-// content). Cheap with widget.List: only the visible bubbles get
-// re-materialized via UpdateItem — Length changing triggers re-layout.
-//
-// "Near the bottom" = within one viewport-height of the post-refresh max
-// offset. This catches the common case (user has the latest visible) and
-// avoids yanking the view away when they've intentionally scrolled up.
+// refreshMessages rebuilds the visible window after an in-place mutation
+// (receipt, reaction, edit, delete, media arriving) and either follows the
+// new bottom or pins the viewport exactly where the user left it, per the
+// tail-follow policy in chat_follow.go. Cheap with widget.List: only the
+// visible bubbles get re-materialized via UpdateItem.
 func (cv *ChatView) refreshMessages() {
 	t0 := time.Now()
 	cv.muUpdateStats.Lock()
@@ -1411,30 +1444,18 @@ func (cv *ChatView) refreshMessages() {
 		return
 	}
 
-	preOffset := cv.messageList.GetScrollOffset()
-	viewportH := cv.messageList.Size().Height
-
-	cv.messageList.Refresh()
-	cv.messageList.ScrollToBottom()
-
-	// Both scroll calls are synchronous against widget.List's internal
-	// state; only the final scroll position is rendered, so this doesn't
-	// flicker. (The probe ScrollToBottom + read + maybe restore happens
-	// inside one UI tick.)
-	if newBottom := cv.messageList.GetScrollOffset(); newBottom-preOffset > viewportH {
-		cv.messageList.ScrollToOffset(preOffset)
-	}
+	cv.renderMessagesRespectingScroll(false)
 }
 
-// scrollToLatest unconditionally jumps to the latest message — used when
-// switching chats so the user lands on the freshest content regardless of
-// where they were in the previous chat.
+// scrollToLatest unconditionally jumps to the latest message and resumes
+// following it — used when switching chats (so the user lands on the
+// freshest content regardless of where they were in the previous one) and
+// as the "N new messages" pill's action.
 func (cv *ChatView) scrollToLatest() {
 	if cv.messageList == nil {
 		return
 	}
-	cv.messageList.Refresh()
-	cv.messageList.ScrollToBottom()
+	cv.renderFollowingTail()
 }
 
 // loadOlderMessages expands the render window by renderChunk without
@@ -1482,14 +1503,31 @@ func (cv *ChatView) scrollToMessage(msgIdx int) {
 		listID++
 	}
 	cv.messageList.ScrollTo(listID)
+	// Jumping to a search hit, a reply target or a quoted message is the
+	// user leaving the live edge on purpose. Recording it here means the
+	// next arrival probes for the real answer instead of inferring one
+	// from a scroll offset we no longer own.
+	cv.followTail = false
+	cv.lastSetOffset = cv.messageList.GetScrollOffset()
 }
 
-func (cv *ChatView) appendMessageBubble(_ *Message) {
+// appendMessageBubble renders a message that was just added to the open
+// chat. Following the tail is the common case; when the user is reading
+// history the viewport stays put and the pill advertises what arrived.
+func (cv *ChatView) appendMessageBubble(msg *Message) {
 	if cv.messageList == nil {
 		return
 	}
-	cv.messageList.Refresh()
-	cv.messageList.ScrollToBottom()
+	// Our own message always wins the argument: you just pressed Enter,
+	// you want to watch it land.
+	if msg != nil && msg.IsOwn {
+		cv.scrollToLatest()
+		return
+	}
+	if !cv.renderMessagesRespectingScroll(true) {
+		cv.pendingNew++
+		cv.syncNewMessagesPill()
+	}
 }
 
 func (cv *ChatView) onSearch(text string) {
@@ -2807,17 +2845,19 @@ func (cv *ChatView) AddMessage(msg client.MessageEvent) {
 	// Unread + notification: only when this chat isn't actually on screen
 	// (chat open AND window visible) and the message isn't from us. A chat
 	// "open" behind a tray-hidden window must still notify + count unread.
-	// On-screen incoming messages get their read receipt immediately; the
-	// rest stays queued until the chat becomes visible.
+	// Every incoming message is queued for a receipt here; who sends it and
+	// when is the render path's call (see chat_follow.go).
 	onScreen := (jidStr == cur || isSibling) && cv.isWindowVisible()
 	if !msg.Info.IsFromMe {
 		cv.queuePendingRead(jidStr, client.MarkTarget{
 			ID:        msg.Info.ID,
 			SenderJID: msg.SenderJid.String(),
 		})
-		if onScreen {
-			cv.flushPendingReads(cur)
-		} else {
+		// On-screen receipts are settled on the UI thread instead: the
+		// render path flushes the queue once the message is actually
+		// visible, and holds it while the user is reading history further
+		// up — no blue ticks for messages they haven't reached yet.
+		if !onScreen {
 			cv.incrementUnread(jidStr)
 			// Muted chats still count unread but stay silent — matches
 			// the phone's behavior.
@@ -2961,7 +3001,11 @@ func (cv *ChatView) OnWindowShown() {
 	if changed {
 		cv.refreshChats()
 	}
-	cv.flushPendingReads(cur)
+	// Only the tail is truly "seen" on reshow — a view frozen on older
+	// content keeps its receipts queued until the user scrolls back down.
+	if cv.followTail {
+		cv.flushPendingReads(cur)
+	}
 }
 
 // maybeFetchAvatar kicks off an async profile picture download for the given
