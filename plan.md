@@ -51,6 +51,14 @@
 
 > Padrão consolidado: todo send precisa de **echo local** (applyReaction/applyEdit/applyRevoke — persiste + dispara o mesmo callback do recebimento, com fallback de sibling LID/PN). O servidor nunca ecoa sends ao device emissor.
 
+**Sessão 2026-07-29** — incômodo reportado pelo Pedro (scroll pulava ao ler grupo movimentado):
+
+| Tarefa | Commit | |
+|--------|--------|---|
+| D5 — tail-follow + pill "↓ N new messages" (`ui/chat_follow.go`) | `02b3f7f` | ✅ |
+
+> Padrão novo: o `widget.List` do Fyne não expõe `OnScrolled` (o scroller é não-exportado), mas `Refresh()` roda `UpdateItem` sobre **toda** linha visível de forma síncrona — então o refresh que a renderização já ia fazer responde "onde o usuário está olhando?". Vale para qualquer feature futura que precise da posição de leitura (D6, C1). Estado de follow é UI-thread-only, sem lock: o flush de read receipt saiu do `AddMessage` pra manter essa invariante.
+
 **Pendentes**, em ordem sugerida: C4 (split do chat_view.go, ~3000 linhas), B4 (typing), C5 (coalesce refreshMessages), C3 (decode assíncrono), C1 (paginação), B7 (picker de envio de vídeo), edição de caption (v2 do B3b — exige reter proto de mídia), e o restante do Milestone D.
 
 > Validação manual recomendada pós-B1/B5/B6 (precisa de sessão real): badge do celular limpa ao abrir chat com não-lidas; fixados no topo; mutado não notifica; arquivar pelo menu ⋯ reflete no celular; Shift+Enter no composer; "💬 Conversar com +número" no novo chat.
@@ -214,7 +222,7 @@ Dividir em três commits:
 | D2 | **Menções legíveis** | `@5511...` → `@Nome` via `ContextInfo.GetMentionedJID()` + `LookupName` no texto recebido | S–M |
 | D3 | **Link preview** | `ExtendedTextMessage` já traz `Title/Description/JPEGThumbnail` das previews **sem precisar de fetch** — hoje é descartado em `extractText`. Persistir + card clicável na bolha | M |
 | D4 | **Busca global de mensagens** | FTS5 (ou `LIKE` v1) em `messages.db` + dialog (Ctrl+Shift+F): resultado abre o chat e rola até a mensagem (usa C1) | M–L |
-| D5 | **Pill "N novas mensagens"** | Quando scrolled-up e chega mensagem, botão flutuante "↓ 3 novas" → `scrollToLatest` | S–M |
+| ~~D5~~ | ~~**Pill "N novas mensagens"**~~ | ✅ feito em `02b3f7f` — junto com a política de tail-follow (`ui/chat_follow.go`) | — |
 | D6 | **Divisor "Não lidas"** | Linha "— N não lidas —" ao abrir chat com unread > 0 (mesma mecânica do dateSep) | S |
 | D7 | **Progresso de áudio** | Ticker `0:07 / 0:32` durante playback (ffplay não reporta posição — cronometrar localmente); waveform do proto se vier | S–M |
 | D8 | **Auto-QR no login** | Gerar QR automaticamente ao mostrar a tela (remove o clique em "Generate QR Code") | XS |
@@ -229,7 +237,7 @@ Dividir em três commits:
 ## Ordem de execução recomendada
 
 ```
-[✅ feitos] 0, A1–A4, B1, B9, C2, B5, B2, B6, D8, B8, B3a, B3b, B3c, D11,
+[✅ feitos] 0, A1–A4, B1, B9, C2, B5, B2, B6, D8, B8, B3a, B3b, B3c, D5, D11,
            reações(fix), quote-names(fix), forward+selo, paste-arquivos,
            migração de schema — ver Status acima
 C4 (split do chat_view.go)    ← próximo: arquivo passou de 3000 linhas
